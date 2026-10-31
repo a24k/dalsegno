@@ -14,11 +14,15 @@ audio fragment -> container reader -> AAC packets -> decoder (one per contiguous
 ```
 
 - **Grid.** Within a run, sample position counts continuously from the run's anchor, which
-  is what makes incremental output equal batch output. A bin of 0.1 s belongs to the
-  fragment in which it starts, and the cursor carries partial bins.
+  is what makes incremental output equal batch output. A bin is stored with the fragment
+  whose processing completed it, which is later than where it starts because the resampler
+  looks ahead. `first_bin` places it on the grid, so readers need not care.
 - **Drift check.** If the sample position and measured `stream_time` disagree by over
   50 ms, log a warning and start a new run. This also covers the origin skipping time.
-- **Restart.** Resume one fragment early, discarding output, to re-prime the decoder.
+- **Restart.** Resume one fragment early, discarding output, to re-prime the decoder. AAC noise
+  substitution draws from a generator that the restart cannot restore, so values after a
+  restart can differ from an unbroken pass in the last bits. On real fragments, 3 of 1,000
+  values differed, by at most 1e-6. An unbroken run equals a batch run exactly.
 - **Gaps.** Reset the decoder, drop the partial bin and start a new run on the same grid.
 - **Filled gaps.** A fill becomes a run that also recomputes the first fragment after the
   gap, which was decoded without its predecessor, and then merges with the following run.

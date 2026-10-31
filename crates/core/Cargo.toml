@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
+symphonia-codec-aac.workspace = true
+symphonia-core.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
