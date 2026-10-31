@@ -52,10 +52,11 @@ Offline commands read files and never need the service (FR-N11). Passing `--env`
 `--video` selects offline mode; otherwise `scan`, `diff` and `refine` call the API:
 
 ```text
-dalsegno period --env <file>
-dalsegno scan   --env <file> --period <s>
-dalsegno diff   --env <file> --against <file>...
-dalsegno refine --video <file> --at <s>
+dalsegno envelope --fragments <dir> --first <sq> --last <sq> --output <file>
+dalsegno period   --env <file> [--min <s>] [--max <s>]
+dalsegno scan     --env <file> --period <s> [--from <s>]
+dalsegno diff     --env <file> --period <s> --against <file> --against-period <s> [--known <file>]
+dalsegno refine   --video <file> --at <s>
 ```
 
 Envelope input accepts `.npy` so that existing Python results can be used directly.

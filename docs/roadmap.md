@@ -51,6 +51,8 @@ equals batch, within the noise generator's last bits after a restart.
 NCC, `Series`, period, tracking, change signals, baseline diff, self-checks, manual known
 material, offline CLI.
 
+Results are in [reference/m3-verification.md](reference/m3-verification.md).
+
 **Exit:** the known answers are reproduced from the in-process envelope, which is what shows it
 is good enough for analysis. Reproducing them from a Python `.npy` alone does not meet this
 exit. Synthetic cases also pass for shrinkage (D-01), harmonics (D-02), song-length net-zero

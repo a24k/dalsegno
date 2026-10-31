@@ -119,8 +119,16 @@ Baseline, from measured-facts section 4.5:
 1. Cut the current cycle into 60-second windows at 30-second steps.
 2. Search each in every stored version's cycle, extended 10 minutes either side.
 3. Per window, record best version, position and score.
-4. Convert to `shift = t_new − t_old`, and detect where shift changes, ignoring brief flips.
-5. Classify:
+4. Convert to `shift = t_new − t_old`, and detect where shift changes. A shift held for under
+   5 minutes is a brief flip, because repeated material matches its other occurrences for as
+   long as it plays.
+5. Move region edges to about 3 s, by walking outwards from inside the region at a fixed shift
+   with a 5-second window. A 60-second window straddling an edge matches nothing, or matches past
+   the true edge.
+6. Keep the heaviest chain of existing regions that follows the old order without overlapping.
+   The rest are copies, such as repeated material placed in front of an addition, and count
+   as inserted. Shift changes are taken along this chain.
+7. Classify:
 
 | Class | Rule |
 | --- | --- |
@@ -141,8 +149,13 @@ pub struct SelfCheck { name: String, expected: f64, actual: f64, tolerance: f64,
 - Sum of shift changes equals the period change.
 - Inserted (new, revival and known regions) minus deleted equals the period change.
 
-Tolerance starts at 5 s (the known example is off by 1 s). A failure asks for human
+Tolerance starts at 5 s (the known example is off by 1 s). Lengths depend on region edges, each
+good to about 3 s, so the second check allows at least 3 s per edge. A failure asks for human
 review and never blocks the workflow.
+
+The second check is weaker than it looks. Regions divide each cycle without gaps, so it mostly
+restates the first, and on the known example they agree to the tenth of a second. Treat a pass as
+a sanity check, not as independent evidence.
 
 ## Evaluation (milestone 7)
 
