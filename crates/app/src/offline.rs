@@ -15,6 +15,14 @@ use std::path::{Path, PathBuf};
 
 const CLIP_THRESHOLD: f32 = 0.8;
 
+fn require_period(seconds: f64) -> Result<(), AcquireError> {
+    if seconds.is_finite() && seconds > 0.0 {
+        Ok(())
+    } else {
+        Err(AcquireError::InvalidRequest("a period must be positive"))
+    }
+}
+
 fn load(path: &Path) -> Result<Prepared, AcquireError> {
     let values = read_f32(path).map_err(|error| AcquireError::Envelope(error.to_string()))?;
     Ok(Prepared::new(&Series::complete(0.0, BIN_RATE, values)))
@@ -80,6 +88,11 @@ pub struct PeriodReport {
 
 /// Estimates the period of an envelope file.
 pub fn period(path: &Path, config: &PeriodConfig) -> Result<PeriodReport, AcquireError> {
+    require_period(config.min_period)?;
+    require_period(config.max_period)?;
+    if config.min_period >= config.max_period {
+        return Err(AcquireError::InvalidRequest("min must be below max"));
+    }
     Ok(match estimate_period(&load(path)?, config) {
         PeriodEstimate::Found {
             period,
@@ -111,6 +124,10 @@ pub struct ScanReport {
 
 /// Tracks the lag through an envelope file from `from` seconds, or from one period in.
 pub fn scan(path: &Path, period: f64, from: Option<f64>) -> Result<ScanReport, AcquireError> {
+    require_period(period)?;
+    if from.is_some_and(|start| !start.is_finite() || start < 0.0) {
+        return Err(AcquireError::InvalidRequest("from must not be negative"));
+    }
     let data = load(path)?;
     let config = TrackConfig::default();
     let start = from.unwrap_or(period);
@@ -139,6 +156,11 @@ pub struct DiffRequest {
 
 /// Compares the last cycle of one envelope file with the last cycles of others.
 pub fn diff(request: &DiffRequest) -> Result<Diff, AcquireError> {
+    require_period(request.period)?;
+    require_period(request.against_period)?;
+    for (_, period) in &request.older {
+        require_period(*period)?;
+    }
     let config = DiffConfig::default();
     let current = load(&request.current)?;
     let start = last_cycle_start(&current, request.period, &config)?;
@@ -309,6 +331,46 @@ mod tests {
             known: None,
         };
 
+        assert!(matches!(
+            diff(&request),
+            Err(AcquireError::InvalidRequest(_))
+        ));
+    }
+
+    #[test]
+    fn nonsense_numbers_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = file(dir.path(), "env.npy", &noise(8, 100.0));
+        let with = |min_period, max_period| PeriodConfig {
+            min_period,
+            max_period,
+            ..PeriodConfig::default()
+        };
+
+        for config in [with(0.0, 100.0), with(200.0, 100.0), with(f64::NAN, 100.0)] {
+            assert!(matches!(
+                period(&path, &config),
+                Err(AcquireError::InvalidRequest(_))
+            ));
+        }
+        for value in [0.0, -1.0, f64::NAN] {
+            assert!(matches!(
+                scan(&path, value, None),
+                Err(AcquireError::InvalidRequest(_))
+            ));
+        }
+        assert!(matches!(
+            scan(&path, 50.0, Some(f64::NAN)),
+            Err(AcquireError::InvalidRequest(_))
+        ));
+        let request = DiffRequest {
+            current: path.clone(),
+            period: f64::NAN,
+            against: path,
+            against_period: 50.0,
+            older: Vec::new(),
+            known: None,
+        };
         assert!(matches!(
             diff(&request),
             Err(AcquireError::InvalidRequest(_))

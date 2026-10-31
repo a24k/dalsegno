@@ -122,6 +122,9 @@ Baseline, from measured-facts section 4.5:
 4. Convert to `shift = t_new − t_old`, and detect where shift changes. A shift held for under
    5 minutes is a brief flip, because repeated material matches its other occurrences for as
    long as it plays.
+   Between equal shifts, a flip is bridged, and so is silence or a recording gap of any length,
+   but at most 5 unmatched windows, about 150 s, which matches the limit of D-04. More than that
+   is a net-zero replacement, and less can be a quiet scene.
 5. Move region edges to about 3 s, by walking outwards from inside the region at a fixed shift
    with a 5-second window. A 60-second window straddling an edge matches nothing, or matches past
    the true edge.
@@ -137,6 +140,7 @@ Baseline, from measured-facts section 4.5:
 | known | Overlaps a registered known clip. |
 | new | No stable match anywhere. |
 | deleted | Region of the previous version with no counterpart. |
+| no data | Silence or a recording gap between different shifts. Never counted as inserted (D-05). |
 
 The window search is rayon-parallel, using one FFT plan per thread.
 

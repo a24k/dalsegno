@@ -44,11 +44,17 @@ pub struct Prepared {
 impl Prepared {
     /// Fills holes with the mean of the values on either side, and takes the sums.
     pub fn new(series: &Series) -> Self {
-        let filled = fill_holes(series);
+        let measured: Vec<bool> = series
+            .values
+            .iter()
+            .zip(&series.valid)
+            .map(|(value, valid)| *valid && value.is_finite())
+            .collect();
+        let filled = fill_holes(&series.values, &measured);
         let sums = cumulative(filled.iter().copied());
         let squares = cumulative(filled.iter().map(|value| value * value));
         let invalid = std::iter::once(0)
-            .chain(series.valid.iter().scan(0, |count, valid| {
+            .chain(measured.iter().scan(0, |count, valid| {
                 *count += u32::from(!valid);
                 Some(*count)
             }))
@@ -94,42 +100,6 @@ impl Prepared {
         (seconds * self.rate).round() as usize
     }
 
-    /// Copies a stretch of samples into its own series.
-    pub(crate) fn slice(&self, start: usize, end: usize) -> Self {
-        let filled = self.filled[start..end].to_vec();
-        let base = self.invalid[start];
-        Self {
-            start_time: self.time_of(start),
-            rate: self.rate,
-            sums: cumulative(filled.iter().copied()),
-            squares: cumulative(filled.iter().map(|value| value * value)),
-            invalid: self.invalid[start..=end]
-                .iter()
-                .map(|count| count - base)
-                .collect(),
-            filled,
-        }
-    }
-
-    /// Returns this series followed by `other`, for comparing across two series.
-    pub(crate) fn joined_with(&self, other: &Self) -> Self {
-        let filled = [&self.filled[..], &other.filled].concat();
-        let missing = self.invalid[self.len()];
-        Self {
-            start_time: self.start_time,
-            rate: self.rate,
-            sums: cumulative(filled.iter().copied()),
-            squares: cumulative(filled.iter().map(|value| value * value)),
-            invalid: self
-                .invalid
-                .iter()
-                .copied()
-                .chain(other.invalid[1..].iter().map(|count| count + missing))
-                .collect(),
-            filled,
-        }
-    }
-
     /// Returns the mean and standard deviation of a window.
     pub(crate) fn stats(&self, start: usize, length: usize) -> (f64, f64) {
         let end = start + length;
@@ -158,20 +128,16 @@ fn cumulative(values: impl Iterator<Item = f64>) -> Vec<f64> {
         .collect()
 }
 
-fn fill_holes(series: &Series) -> Vec<f64> {
-    let mut filled: Vec<f64> = series
-        .values
-        .iter()
-        .map(|value| f64::from(*value))
-        .collect();
+fn fill_holes(values: &[f32], measured: &[bool]) -> Vec<f64> {
+    let mut filled: Vec<f64> = values.iter().map(|value| f64::from(*value)).collect();
     let mut index = 0;
     while index < filled.len() {
-        if series.valid[index] {
+        if measured[index] {
             index += 1;
             continue;
         }
         let start = index;
-        while index < filled.len() && !series.valid[index] {
+        while index < filled.len() && !measured[index] {
             index += 1;
         }
         let before = start.checked_sub(1).map(|at| filled[at]);
@@ -221,6 +187,16 @@ mod tests {
             Prepared::new(&with_hole(&[9.0, 9.0], 0..2)).filled,
             [0.0, 0.0]
         );
+    }
+
+    #[test]
+    fn values_that_are_not_finite_count_as_holes() {
+        let values = vec![1.0, f32::NAN, f32::INFINITY, 3.0];
+        let prepared = Prepared::new(&Series::complete(0.0, 1.0, values));
+
+        assert_eq!(prepared.filled, [1.0, 2.0, 2.0, 3.0]);
+        assert!(!prepared.has_data(0, 4));
+        assert!(prepared.stats(0, 4).1.is_finite());
     }
 
     #[test]

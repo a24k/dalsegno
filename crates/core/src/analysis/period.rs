@@ -126,9 +126,13 @@ fn reference_peaks(
         .map(|offset| start - (first + offset))
         .collect();
     lags.sort_unstable();
-    let shortest = lags.first().copied();
+    // The search reaches past the maximum only to see a match at double the period.
+    let Some(shortest) = lags.first().copied().filter(|lag| *lag <= longest) else {
+        return Vec::new();
+    };
+    let double_limit = 2 * shortest + 2 * data.samples(config.tolerance);
     lags.into_iter()
-        .filter(|lag| *lag <= longest || shortest.is_some_and(|value| *lag <= 2 * value + 40))
+        .filter(|lag| *lag <= longest || *lag <= double_limit)
         .map(|lag| lag as f64 / data.rate)
         .collect()
 }
@@ -230,6 +234,22 @@ mod tests {
         };
 
         assert!((testable_up_to - 1280.0).abs() < 0.5, "{testable_up_to}");
+    }
+
+    #[test]
+    fn a_period_beyond_the_maximum_is_not_reported() {
+        let data = prepared(&content(9, 1500.0).repeat(4));
+        let config = PeriodConfig {
+            max_period: 1000.0,
+            ..CONFIG
+        };
+
+        let estimate = estimate_period(&data, &config);
+
+        assert!(
+            matches!(estimate, PeriodEstimate::NoPeriod { .. }),
+            "{estimate:?}"
+        );
     }
 
     #[test]

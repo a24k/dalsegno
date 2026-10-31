@@ -47,22 +47,33 @@ impl Default for Correlator {
 }
 
 impl Correlator {
-    /// Scores the window `reference` at each start position in `positions`.
-    ///
-    /// The numerator comes from an FFT and the denominators from cumulative sums. Positions
-    /// that are too flat or have too many holes score 0.
+    /// Scores the window `reference` at each start position in `positions` of the same series.
     pub fn scores(
         &mut self,
         data: &Prepared,
         reference: Range<usize>,
         positions: Range<usize>,
     ) -> Vec<f32> {
+        self.scores_across(data, reference, data, positions)
+    }
+
+    /// Scores a window of `source` at each start position in `positions` of `data`.
+    ///
+    /// The numerator comes from an FFT and the denominators from cumulative sums. Positions
+    /// that are too flat or have too many holes score 0.
+    pub fn scores_across(
+        &mut self,
+        source: &Prepared,
+        reference: Range<usize>,
+        data: &Prepared,
+        positions: Range<usize>,
+    ) -> Vec<f32> {
         let length = reference.len();
-        let (mean, deviation) = data.stats(reference.start, length);
+        let (mean, deviation) = source.stats(reference.start, length);
         if deviation <= 0.0 || positions.is_empty() {
             return vec![0.0; positions.len()];
         }
-        let normalised: Vec<f64> = data.filled[reference]
+        let normalised: Vec<f64> = source.filled[reference]
             .iter()
             .map(|value| (value - mean) / deviation)
             .collect();

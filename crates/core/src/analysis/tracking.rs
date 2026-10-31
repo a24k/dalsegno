@@ -233,6 +233,11 @@ pub fn detect_signals(runs: &[LagRun], period: f64, config: &TrackConfig) -> Vec
                     });
                 }
             }
+            // Silence and outages are no evidence, so they do not count towards lost track.
+            (RunKind::NoData, _) => {
+                let skipped = run.end - run.start + config.step;
+                stable_until = stable_until.map(|since| since + skipped);
+            }
             (RunKind::Unmatched, _) if run.points >= config.min_unmatched_points => {
                 signals.push(Signal::Unmatched {
                     start: run.start,
@@ -273,21 +278,26 @@ pub fn narrow_change(
     const STEP: f64 = 5.0;
     let count = ((times.end - times.start) / STEP).ceil().max(0.0) as usize;
     let moments = (0..count).map(|index| times.start + index as f64 * STEP);
-    let start = moments.clone().find(|time| {
-        correlation_at(data, *time, old_period, config.window)
+    let mut correlator = Correlator::default();
+    let mut breaks = |time: &f64, period: f64| {
+        correlation_at(&mut correlator, data, *time, period, config.window)
             .is_some_and(|score| score < config.threshold)
-    });
+    };
+    let start = moments.clone().find(|time| breaks(time, old_period));
     let end = moments
         .rev()
-        .find(|time| {
-            correlation_at(data, *time, new_period, config.window)
-                .is_some_and(|score| score < config.threshold)
-        })
+        .find(|time| breaks(time, new_period))
         .map(|time| time + STEP);
     ChangeBounds { start, end }
 }
 
-fn correlation_at(data: &Prepared, time: f64, lag: f64, window: f64) -> Option<f32> {
+fn correlation_at(
+    correlator: &mut Correlator,
+    data: &Prepared,
+    time: f64,
+    lag: f64,
+    window: f64,
+) -> Option<f32> {
     let length = data.samples(window);
     let start = data.index_of(time)?;
     let earlier = start.checked_sub(data.samples(lag))?;
@@ -297,7 +307,7 @@ fn correlation_at(data: &Prepared, time: f64, lag: f64, window: f64) -> Option<f
     if !data.has_data(start, length) || !data.has_data(earlier, length) {
         return None;
     }
-    Correlator::default()
+    correlator
         .scores(data, start..start + length, earlier..earlier + 1)
         .first()
         .copied()
@@ -481,6 +491,18 @@ mod tests {
             Match::NoData,
             lag(P),
         ];
+        let config = config();
+
+        let runs = summarise(&points(&found), &config);
+
+        assert_eq!(detect_signals(&runs, P, &config), []);
+    }
+
+    #[test]
+    fn a_long_outage_is_not_lost_track() {
+        let mut found = vec![lag(P)];
+        found.extend(vec![Match::NoData; 80]);
+        found.push(lag(P));
         let config = config();
 
         let runs = summarise(&points(&found), &config);

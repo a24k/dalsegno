@@ -19,6 +19,9 @@ pub struct DiffConfig {
     pub threshold: f32,
     /// Shifts within this many seconds belong to one region.
     pub shift_tolerance: f64,
+    /// Unmatched windows between equal shifts that are bridged, as quiet scenes match poorly.
+    /// More than this is a replacement, which keeps the shift the same.
+    pub max_bridged_unmatched: usize,
     /// A shift held for fewer windows is a brief flip. This must outlast repeated material,
     /// which matches its other occurrences for as long as it plays.
     pub min_windows: usize,
@@ -43,6 +46,7 @@ impl Default for DiffConfig {
             step: 30.0,
             threshold: 0.7,
             shift_tolerance: 3.0,
+            max_bridged_unmatched: 5,
             min_windows: 10,
             check_tolerance: 5.0,
             min_deleted_seconds: 60.0,
@@ -88,6 +92,8 @@ pub enum RegionClass {
     Known,
     /// Found nowhere.
     New,
+    /// Silence or a recording gap, which says nothing either way (D-05).
+    NoData,
     /// In the previous version, with no counterpart now.
     Deleted,
 }
@@ -146,9 +152,17 @@ struct Found {
     offset: f64,
 }
 
+/// What one window found. No data is not a mismatch (D-05).
+#[derive(Debug, Clone, Copy)]
+enum Window {
+    NoData,
+    NoMatch,
+    Found(Found),
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Span {
-    found: Option<Found>,
+    window: Window,
     first: usize,
     last: usize,
 }
@@ -231,11 +245,14 @@ pub fn locate_clip(
         return Vec::new();
     };
     let last = end.min(limit);
-    if first > last {
+    if first > last || length == 0 {
+        return Vec::new();
+    }
+    if clip.stats(0, length).1 < MIN_REFERENCE_DEVIATION {
         return Vec::new();
     }
     let mut correlator = Correlator::default();
-    let scores = cross_scores(&mut correlator, clip, 0, length, current, first..last + 1);
+    let scores = correlator.scores_across(clip, 0..length, current, first..last + 1);
     clusters(&scores, threshold)
         .map(|offset| {
             let start = current.time_of(first + offset);
@@ -248,7 +265,11 @@ pub fn locate_clip(
 }
 
 fn is_inserted(region: &Region) -> bool {
-    region.class != RegionClass::Existing || region.moved
+    match region.class {
+        RegionClass::Existing => region.moved,
+        RegionClass::NoData | RegionClass::Deleted => false,
+        RegionClass::Revival | RegionClass::Known | RegionClass::New => true,
+    }
 }
 
 fn check(name: &str, expected: f64, actual: f64, tolerance: f64) -> SelfCheck {
@@ -267,21 +288,23 @@ fn match_windows(
     period: f64,
     versions: &[VersionCycle<'_>],
     config: &DiffConfig,
-) -> Vec<Option<Found>> {
+) -> Vec<Window> {
     let length = current.samples(config.window);
     let count = (period / config.step).floor() as usize;
     (0..count)
         .into_par_iter()
         .map_init(Correlator::default, |correlator, index| {
             let time = start + index as f64 * config.step;
-            let at = current.index_of(time)?;
+            let Some(at) = current.index_of(time) else {
+                return Window::NoData;
+            };
             if at + length > current.len()
                 || !current.has_data(at, length)
                 || current.stats(at, length).1 < MIN_REFERENCE_DEVIATION
             {
-                return None;
+                return Window::NoData;
             }
-            versions.iter().enumerate().find_map(|(version, cycle)| {
+            let found = versions.iter().enumerate().find_map(|(version, cycle)| {
                 best_in_version(correlator, current, at, length, time, cycle, config).map(
                     |(position, shift)| Found {
                         version,
@@ -290,7 +313,8 @@ fn match_windows(
                         offset: time - position,
                     },
                 )
-            })
+            });
+            found.map_or(Window::NoMatch, Window::Found)
         })
         .collect()
 }
@@ -314,7 +338,7 @@ fn best_in_version(
     if first > last {
         return None;
     }
-    let scores = cross_scores(correlator, current, at, length, data, first..last + 1);
+    let scores = correlator.scores_across(current, at..at + length, data, first..last + 1);
     let (offset, score) = scores
         .iter()
         .enumerate()
@@ -324,24 +348,6 @@ fn best_in_version(
     }
     let position = data.time_of(first + offset);
     Some((position, (time - position).rem_euclid(cycle.period)))
-}
-
-/// Scores a window of one series against another by joining them.
-fn cross_scores(
-    correlator: &mut Correlator,
-    current: &Prepared,
-    at: usize,
-    length: usize,
-    data: &Prepared,
-    positions: std::ops::Range<usize>,
-) -> Vec<f32> {
-    if std::ptr::eq(current, data) {
-        return correlator.scores(data, at..at + length, positions);
-    }
-    let segment = data.slice(positions.start, positions.end + length - 1);
-    let window = current.slice(at, at + length);
-    let joined = segment.joined_with(&window);
-    correlator.scores(&joined, segment.len()..joined.len(), 0..positions.len())
 }
 
 fn circular_distance(a: f64, b: f64, period: f64) -> f64 {
@@ -354,13 +360,13 @@ fn same_key(a: Found, b: Found, versions: &[VersionCycle<'_>], config: &DiffConf
         && circular_distance(a.shift, b.shift, versions[a.version].period) <= config.shift_tolerance
 }
 
-fn group(found: &[Option<Found>], versions: &[VersionCycle<'_>], config: &DiffConfig) -> Vec<Span> {
+fn group(found: &[Window], versions: &[VersionCycle<'_>], config: &DiffConfig) -> Vec<Span> {
     let mut spans: Vec<Span> = Vec::new();
-    for (index, item) in found.iter().enumerate() {
+    for (index, window) in found.iter().enumerate() {
         match spans.last_mut() {
-            Some(span) if same_span(span.found, *item, versions, config) => span.last = index,
+            Some(span) if same_span(span.window, *window, versions, config) => span.last = index,
             _ => spans.push(Span {
-                found: *item,
+                window: *window,
                 first: index,
                 last: index,
             }),
@@ -369,44 +375,47 @@ fn group(found: &[Option<Found>], versions: &[VersionCycle<'_>], config: &DiffCo
     spans
 }
 
-fn same_span(
-    a: Option<Found>,
-    b: Option<Found>,
-    versions: &[VersionCycle<'_>],
-    config: &DiffConfig,
-) -> bool {
+fn same_span(a: Window, b: Window, versions: &[VersionCycle<'_>], config: &DiffConfig) -> bool {
     match (a, b) {
-        (None, None) => true,
-        (Some(a), Some(b)) => same_key(a, b, versions, config),
+        (Window::NoData, Window::NoData) | (Window::NoMatch, Window::NoMatch) => true,
+        (Window::Found(a), Window::Found(b)) => same_key(a, b, versions, config),
         _ => false,
     }
 }
 
 /// Drops brief flips, then joins what they separated.
 fn consolidate(spans: Vec<Span>, versions: &[VersionCycle<'_>], config: &DiffConfig) -> Vec<Span> {
+    let width = |span: &Span| span.last - span.first + 1;
     let lasting: Vec<Option<Found>> = spans
         .iter()
-        .map(|span| {
-            span.found
-                .filter(|_| span.last - span.first + 1 >= config.min_windows)
+        .map(|span| match span.window {
+            Window::Found(found) if width(span) >= config.min_windows => Some(found),
+            _ => None,
         })
         .collect();
     let mut result: Vec<Span> = Vec::new();
     for (index, span) in spans.iter().enumerate() {
-        let is_flip = lasting[index].is_none();
         let previous = lasting[..index].iter().rev().find_map(|found| *found);
         let next = lasting[index + 1..].iter().find_map(|found| *found);
-        let bridged = match (previous, next) {
-            (Some(a), Some(b)) if is_flip && same_key(a, b, versions, config) => {
-                let width = span.last - span.first + 1;
-                (width <= config.min_windows).then_some(a)
+        let window = match (span.window, previous, next) {
+            (_, _, _) if lasting[index].is_some() => span.window,
+            (Window::NoMatch, Some(a), Some(b))
+                if width(span) <= config.max_bridged_unmatched
+                    && same_key(a, b, versions, config) =>
+            {
+                Window::Found(a)
             }
-            _ => None,
+            (Window::NoData | Window::Found(_), Some(a), Some(b))
+                if same_key(a, b, versions, config) =>
+            {
+                Window::Found(a)
+            }
+            (Window::Found(_), _, _) => Window::NoMatch,
+            (other, _, _) => other,
         };
-        let found = bridged.or(lasting[index]);
         match result.last_mut() {
-            Some(last) if same_span(last.found, found, versions, config) => last.last = span.last,
-            _ => result.push(Span { found, ..*span }),
+            Some(last) if same_span(last.window, window, versions, config) => last.last = span.last,
+            _ => result.push(Span { window, ..*span }),
         }
     }
     result
@@ -427,8 +436,8 @@ fn classify(
         match_start: None,
         moved: false,
     };
-    match span.found {
-        Some(found) => Region {
+    match span.window {
+        Window::Found(found) => Region {
             shift: Some(found.shift),
             version: Some(versions[found.version].id),
             match_start: Some(found.position),
@@ -438,8 +447,9 @@ fn classify(
                 RegionClass::Revival
             })
         },
-        None if overlaps_known(start, end, known) => plain(RegionClass::Known),
-        None => plain(RegionClass::New),
+        Window::NoData => plain(RegionClass::NoData),
+        Window::NoMatch if overlaps_known(start, end, known) => plain(RegionClass::Known),
+        Window::NoMatch => plain(RegionClass::New),
     }
 }
 
@@ -456,8 +466,8 @@ fn refine_edges(
     let moved: Vec<Region> = regions
         .iter()
         .zip(spans)
-        .map(|(region, span)| match span.found {
-            Some(found) => {
+        .map(|(region, span)| match span.window {
+            Window::Found(found) => {
                 let comparison = EdgeComparison {
                     current,
                     earlier: versions[found.version].data,
@@ -470,7 +480,7 @@ fn refine_edges(
                     ..*region
                 }
             }
-            None => *region,
+            Window::NoData | Window::NoMatch => *region,
         })
         .collect();
     settle(&moved, config)
@@ -701,285 +711,4 @@ fn deleted_regions(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::synthetic::{content, prepared};
-    use super::*;
-
-    const P: f64 = 3000.0;
-
-    fn version(data: &Prepared, id: i64, period: f64) -> VersionCycle<'_> {
-        VersionCycle {
-            id,
-            data,
-            start: 0.0,
-            period,
-        }
-    }
-
-    fn classes(diff: &Diff) -> Vec<RegionClass> {
-        diff.regions.iter().map(|region| region.class).collect()
-    }
-
-    fn region(diff: &Diff, class: RegionClass) -> Region {
-        *diff
-            .regions
-            .iter()
-            .find(|region| region.class == class)
-            .unwrap()
-    }
-
-    fn compare_cycles(old: &[f32], new: &[f32]) -> Diff {
-        let previous = prepared(&[old, old].concat());
-        let current = prepared(&[new, new].concat());
-        let period = new.len() as f64 / 10.0;
-        let versions = [version(&previous, 1, old.len() as f64 / 10.0)];
-        compare(
-            &current,
-            0.0,
-            period,
-            &versions,
-            &[],
-            &DiffConfig::default(),
-        )
-    }
-
-    #[test]
-    fn an_identical_cycle_is_all_existing() {
-        let cycle = content(1, P);
-
-        let diff = compare_cycles(&cycle, &cycle);
-
-        assert_eq!(classes(&diff), [RegionClass::Existing]);
-        assert!(
-            diff.checks.iter().all(|check| check.passed),
-            "{:?}",
-            diff.checks
-        );
-    }
-
-    #[test]
-    fn an_insertion_is_new_and_passes_the_checks() {
-        let old = content(2, P);
-        let insert = content(3, 500.0);
-        let new = [&old[..12_000], &insert, &old[12_000..]].concat();
-
-        let diff = compare_cycles(&old, &new);
-
-        let added = region(&diff, RegionClass::New);
-        assert!((added.start - 1200.0).abs() < 60.0, "{added:?}");
-        assert!((added.end - added.start - 500.0).abs() < 60.0, "{added:?}");
-        assert_eq!(diff.shift_changes.len(), 1);
-        assert!((diff.shift_changes[0] - 500.0).abs() < 0.2);
-        assert!(
-            diff.checks.iter().all(|check| check.passed),
-            "{:?}",
-            diff.checks
-        );
-    }
-
-    #[test]
-    fn edges_land_near_the_truth_from_either_side() {
-        let old = content(40, P);
-        let insert = content(41, 400.0);
-
-        for at in [10_000, 10_123, 10_257, 10_300] {
-            let new = [&old[..at], &insert, &old[at..]].concat();
-
-            let diff = compare_cycles(&old, &new);
-
-            let added = region(&diff, RegionClass::New);
-            let truth = at as f64 / 10.0;
-            assert!((added.start - truth).abs() <= 3.0, "{at}: {added:?}");
-            assert!((added.end - truth - 400.0).abs() <= 3.0, "{at}: {added:?}");
-        }
-    }
-
-    #[test]
-    fn a_replacement_reports_what_was_deleted() {
-        let old = content(4, P);
-        let insert = content(5, 900.0);
-        let new = [&old[..12_000], &insert, &old[16_000..]].concat();
-
-        let diff = compare_cycles(&old, &new);
-
-        let removed = region(&diff, RegionClass::Deleted);
-        assert!(
-            (removed.end - removed.start - 400.0).abs() < 60.0,
-            "{removed:?}"
-        );
-        assert!((diff.shift_changes[0] - 500.0).abs() < 0.2);
-        assert!(
-            diff.checks.iter().all(|check| check.passed),
-            "{:?}",
-            diff.checks
-        );
-    }
-
-    #[test]
-    fn a_track_from_an_older_version_is_a_revival() {
-        let older = content(6, 2000.0);
-        let old = content(7, P);
-        let new = [&old[..12_000], &older[500..5500], &old[12_000..]].concat();
-        let previous = prepared(&[&old[..], &old[..]].concat());
-        let oldest = prepared(&[&older[..], &older[..]].concat());
-        let current = prepared(&[&new[..], &new[..]].concat());
-        let versions = [version(&previous, 2, P), version(&oldest, 1, 2000.0)];
-
-        let diff = compare(
-            &current,
-            0.0,
-            P + 500.0,
-            &versions,
-            &[],
-            &DiffConfig::default(),
-        );
-
-        let revived = region(&diff, RegionClass::Revival);
-        assert_eq!(revived.version, Some(1));
-        assert!(
-            !classes(&diff).contains(&RegionClass::New),
-            "{:?}",
-            diff.regions
-        );
-    }
-
-    #[test]
-    fn a_copy_out_of_order_counts_as_inserted() {
-        let old = content(20, P);
-        let insert = content(21, 500.0);
-        let copy = &old[2_000..6_000];
-        let new = [&old[..20_000], copy, &insert, &old[20_000..]].concat();
-
-        let diff = compare_cycles(&old, &new);
-
-        assert!(
-            diff.regions.iter().any(|region| region.moved),
-            "{:?}",
-            diff.regions
-        );
-        assert_eq!(diff.shift_changes.len(), 1, "{:?}", diff.shift_changes);
-        assert!((diff.shift_changes[0] - 900.0).abs() < 0.2);
-        assert!(
-            diff.checks.iter().all(|check| check.passed),
-            "{:?}",
-            diff.checks
-        );
-    }
-
-    #[test]
-    fn a_registered_clip_is_known_and_not_new() {
-        let old = content(8, P);
-        let clip = content(9, 211.0);
-        let new = [&old[..12_000], &clip, &old[12_000..]].concat();
-        let previous = prepared(&[&old[..], &old[..]].concat());
-        let current = prepared(&[&new[..], &new[..]].concat());
-        let versions = [version(&previous, 1, P)];
-        let known = [KnownClip {
-            start: 1200.0,
-            end: 1411.0,
-        }];
-
-        let diff = compare(
-            &current,
-            0.0,
-            P + 211.0,
-            &versions,
-            &known,
-            &DiffConfig::default(),
-        );
-
-        assert!(
-            classes(&diff).contains(&RegionClass::Known),
-            "{:?}",
-            diff.regions
-        );
-        assert!(!classes(&diff).contains(&RegionClass::New));
-    }
-
-    #[test]
-    fn a_brief_flip_does_not_split_a_region() {
-        let found = |shift| {
-            Some(Found {
-                version: 0,
-                shift,
-                position: 0.0,
-                offset: 0.0,
-            })
-        };
-        let previous = prepared(&content(10, 100.0));
-        let versions = [version(&previous, 1, P)];
-        let items = [
-            found(100.0),
-            found(100.0),
-            found(100.0),
-            found(900.0),
-            found(100.0),
-            found(100.0),
-            found(100.0),
-        ];
-        let config = DiffConfig {
-            min_windows: 3,
-            ..DiffConfig::default()
-        };
-
-        let spans = consolidate(group(&items, &versions, &config), &versions, &config);
-
-        assert_eq!(spans.len(), 1);
-    }
-
-    #[test]
-    fn a_failed_check_is_reported_and_not_fatal() {
-        let old = content(11, P);
-        let new = [&old[..], &old[..3000]].concat();
-        let previous = prepared(&[&old[..], &old[..]].concat());
-        let current = prepared(&[&new[..], &new[..]].concat());
-        let versions = [version(&previous, 1, P + 7.0)];
-
-        let diff = compare(&current, 0.0, P, &versions, &[], &DiffConfig::default());
-
-        assert!(diff.checks.iter().any(|check| !check.passed));
-    }
-
-    #[test]
-    fn no_versions_makes_everything_new() {
-        let cycle = content(12, 600.0);
-        let current = prepared(&cycle);
-
-        let diff = compare(&current, 0.0, 500.0, &[], &[], &DiffConfig::default());
-
-        assert_eq!(classes(&diff), [RegionClass::New]);
-    }
-
-    #[test]
-    fn a_clip_is_located_at_each_place_it_plays() {
-        let clip = content(30, 211.0);
-        let parts = [
-            content(31, 500.0),
-            clip.clone(),
-            content(32, 300.0),
-            clip.clone(),
-            content(33, 100.0),
-        ];
-        let current = prepared(&parts.concat());
-
-        let found = locate_clip(&current, &prepared(&clip), 0.0..1322.0, 0.8);
-
-        let starts: Vec<f64> = found.iter().map(|clip| clip.start).collect();
-        assert_eq!(starts, [500.0, 1011.0]);
-        assert_eq!(found[0].end, 711.0);
-    }
-
-    #[test]
-    fn a_clip_longer_than_the_series_is_not_found() {
-        let current = prepared(&content(34, 10.0));
-        let clip = prepared(&content(35, 20.0));
-
-        assert_eq!(locate_clip(&current, &clip, 0.0..10.0, 0.8), []);
-    }
-
-    #[test]
-    fn distance_wraps_around_the_period() {
-        assert_eq!(circular_distance(1.0, 2999.0, 3000.0), 2.0);
-        assert_eq!(circular_distance(5.0, 8.0, 3000.0), 3.0);
-    }
-}
+mod tests;
