@@ -376,7 +376,10 @@ impl<R: Resolver> Run<R> {
 
     /// Returns a sample from these headers, at most once a minute.
     async fn head_sample(&self, response: &FragmentResponse, now: i64) -> Option<HeadSample> {
-        let observed_at = response.walltime_ms.map_or(now, |value| value as i64);
+        let observed_at = response
+            .walltime_ms
+            .and_then(|value| i64::try_from(value).ok())
+            .unwrap_or(now);
         let mut last = self.last_head_sample.lock().await;
         if observed_at.saturating_sub(*last) < HEAD_SAMPLE_INTERVAL_MS {
             return None;

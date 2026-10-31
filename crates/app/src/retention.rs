@@ -12,8 +12,8 @@ use std::time::{Duration, SystemTime};
 const DAY_MS: i64 = 24 * 3600 * 1000;
 const AUDIO_RETENTION_DAYS: i64 = 14;
 const SWEEP_BATCH: u32 = 1_000;
-/// A younger temporary file may belong to a running fetch.
-const TEMPORARY_FILE_AGE: Duration = Duration::from_secs(3600);
+/// A younger file may belong to a running fetch, which adds the row after the file.
+const UNTRACKED_FILE_AGE: Duration = Duration::from_secs(3600);
 
 /// What a sweep removed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -48,11 +48,13 @@ fn remove_expired(
     report: &mut SweepReport,
 ) -> Result<(), AcquireError> {
     let cutoff = now - AUDIO_RETENTION_DAYS * DAY_MS;
+    let mut after = None;
     loop {
-        let batch = database.sweep_candidates(cutoff, now, SWEEP_BATCH)?;
-        if batch.is_empty() {
+        let batch = database.sweep_candidates(cutoff, now, after, SWEEP_BATCH)?;
+        let Some(last) = batch.last() else {
             return Ok(());
-        }
+        };
+        after = Some(*last);
         for item in batch {
             store.remove(item.stream_id, item.itag, item.sq)?;
             database.delete_swept(&item)?;
@@ -78,13 +80,14 @@ fn reconcile(
         }
     }
     let oldest = SystemTime::now()
-        .checked_sub(TEMPORARY_FILE_AGE)
+        .checked_sub(UNTRACKED_FILE_AGE)
         .unwrap_or(SystemTime::UNIX_EPOCH);
     for file in store.files()? {
-        let unwanted = match file.key {
+        let is_untracked = match file.key {
             Some(key) => !known.contains(&key),
-            None => file.is_temporary && file.modified < oldest,
+            None => file.is_temporary,
         };
+        let unwanted = is_untracked && file.modified < oldest;
         if !unwanted {
             continue;
         }

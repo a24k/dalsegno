@@ -11,6 +11,9 @@ pub use envelope::{BIN_RATE, EnvelopeCursor};
 
 use crate::container::Mp4Fragment;
 
+/// Over 70 years at 44.1 kHz. Larger values come from a damaged fragment, and would overflow.
+const MAX_START_TICK: u64 = 100_000_000_000_000;
+
 /// Why audio could not be processed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FeatureError {
@@ -55,6 +58,11 @@ impl EnvelopeExtractor {
 
     /// Starts at `first`, with bin zero at tick `origin`.
     pub fn with_grid_origin(first: &Mp4Fragment<'_>, origin: u64) -> Result<Self, FeatureError> {
+        if first.start_ticks > MAX_START_TICK {
+            return Err(FeatureError::Unsupported(
+                "start time out of range".to_string(),
+            ));
+        }
         let decoder = AacStream::new(first.audio_config)?;
         let sample_rate = decoder.sample_rate();
         if sample_rate != first.timescale {
@@ -95,5 +103,43 @@ impl EnvelopeExtractor {
             first_bin: first_bin + kept as u64,
             values: values.split_off(kept),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STEREO_44100_LC: [u8; 2] = [0x12, 0x10];
+
+    fn fragment(start_ticks: u64, timescale: u32) -> Mp4Fragment<'static> {
+        Mp4Fragment {
+            start_ticks,
+            duration_ticks: 0,
+            timescale,
+            packets: Vec::new(),
+            audio_config: &STEREO_44100_LC,
+        }
+    }
+
+    #[test]
+    fn an_absurd_start_time_is_refused() {
+        assert!(matches!(
+            EnvelopeExtractor::new(&fragment(u64::MAX, 44_100)),
+            Err(FeatureError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn a_clock_that_does_not_count_samples_is_refused() {
+        assert!(matches!(
+            EnvelopeExtractor::new(&fragment(0, 48_000)),
+            Err(FeatureError::Timescale { .. })
+        ));
+    }
+
+    #[test]
+    fn realistic_start_times_are_accepted() {
+        assert!(EnvelopeExtractor::new(&fragment(600_000_000_000, 44_100)).is_ok());
     }
 }

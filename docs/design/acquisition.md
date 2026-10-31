@@ -55,8 +55,9 @@ Response classification, applied in one pure function so it can be unit tested:
 | 429, 503, 5xx | `Backoff`, exponential with jitter. |
 
 Files are written to a unique temporary name, fsynced, then renamed, and the database row is
-added last, so a row always means a complete file, and a rerun skips fragments that have one. A
-file without a row is orphaned and removed by the sweep, as is a temporary file over an hour old.
+added last, so a row always means a complete file, and a rerun skips fragments that have one. The
+sweep removes a file without a row, and a temporary file, once it is over an hour old, because a
+younger one may belong to a running fetch.
 Before the row is written, timing is read from the bytes (FR-A9), so a 200 that is not a
 fragment is retried and never stored. WebM carries no duration, so its row records the stream's
 fragment length. Timing is read from WebM and audio mp4 only, so `probe` rejects mp4 video.

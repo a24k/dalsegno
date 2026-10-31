@@ -188,7 +188,8 @@ impl Pass<'_> {
                 values: bins.values,
             };
             self.database.advance_feature_run(run, &row)?;
-            if let Some(next) = following.filter(|next| next.sq_first == sq) {
+            // `<=` also catches a crash between this advance and the merge.
+            if let Some(next) = following.filter(|next| next.sq_first <= sq) {
                 self.database.merge_feature_runs(run, next)?;
                 return Ok(());
             }

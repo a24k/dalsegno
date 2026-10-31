@@ -9,8 +9,9 @@ use dalsegno_store::features::EnvelopeRow;
 use dalsegno_store::fragments::FragmentRow;
 use dalsegno_store::streams::{NewStream, StreamRow};
 use dalsegno_test_support::require_fixtures;
-use std::fs;
+use std::fs::{self, File};
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 
 const AUDIO: u32 = 140;
@@ -263,6 +264,62 @@ fn stream_time_of_a_run_comes_from_the_fragment() {
     assert_eq!(library.rows()[0].first_bin, (expected * 10.0).ceil() as u64);
 }
 
+fn make_old(library: &Library, sq: u64) {
+    let files = library.store.files().unwrap();
+    let wanted = Some((library.stream.id, AUDIO, sq));
+    let file = files.iter().find(|file| file.key == wanted).unwrap();
+    let old = SystemTime::now() - Duration::from_secs(2 * 3600);
+    File::options()
+        .write(true)
+        .open(&file.path)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+}
+
+#[test]
+fn sweep_leaves_a_fresh_file_whose_row_may_still_be_coming() {
+    let mut library = Library::new();
+    library
+        .store
+        .write(library.stream.id, AUDIO, 3, b"being fetched")
+        .unwrap();
+
+    let report = sweep(&mut library.database, &library.store, NOW).unwrap();
+
+    assert_eq!(report.orphans, 0);
+    assert!(library.store.contains(library.stream.id, AUDIO, 3));
+}
+
+#[test]
+fn a_crash_before_the_merge_is_repaired_by_the_next_pass() {
+    let fixtures = require_fixtures!();
+    let source = fixtures.join("frag-140");
+    let expected = batch(&source, 0..16);
+    let mut library = Library::new();
+    library.add_range(&source, 0..6);
+    library.add_range(&source, 10..16);
+    library.extract();
+    library.add_range(&source, 6..10);
+    library.extract();
+    assert_eq!(library.run_bounds(), [(100, 116)]);
+    // Rebuild the state a crash leaves: the first run is past the second, which still exists.
+    library
+        .database
+        .connection()
+        .execute_batch(
+            "UPDATE feature_runs SET next_sq = 111; \
+             INSERT INTO feature_runs (stream_id, feature, sq_first, next_sq, anchor_time) \
+             VALUES (1, 'env10', 110, 116, 0.0);",
+        )
+        .unwrap();
+
+    library.extract();
+
+    assert_eq!(library.run_bounds(), [(100, 116)]);
+    assert_close(&flatten(&library.rows()), &expected);
+}
+
 #[test]
 fn sweep_removes_expired_fragments_with_their_files() {
     let mut library = Library::new();
@@ -288,6 +345,7 @@ fn sweep_repairs_rows_without_files_and_files_without_rows() {
         .store
         .write(library.stream.id, AUDIO, 3, b"orphan")
         .unwrap();
+    make_old(&library, 3);
 
     let report = sweep(&mut library.database, &library.store, NOW).unwrap();
 

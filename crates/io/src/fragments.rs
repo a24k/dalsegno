@@ -71,7 +71,7 @@ impl FragmentStore {
                 for bucket in subdirectories(&track)? {
                     for entry in fs::read_dir(&bucket)? {
                         let path = entry?.path();
-                        files.push(StoredFile::describe(&stream, &track, path)?);
+                        files.extend(StoredFile::describe(&stream, &track, path)?);
                     }
                 }
             }
@@ -132,17 +132,23 @@ pub struct StoredFile {
 }
 
 impl StoredFile {
-    fn describe(stream: &Path, track: &Path, path: PathBuf) -> io::Result<Self> {
+    /// Returns `None` for a file that vanished, such as a temporary one just renamed.
+    fn describe(stream: &Path, track: &Path, path: PathBuf) -> io::Result<Option<Self>> {
         let key = number(stream)
             .zip(number(track))
             .zip(number(&path))
             .map(|((stream, itag), sq)| (stream, itag, sq));
-        Ok(Self {
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some(Self {
             is_temporary: path.extension().is_some_and(|extension| extension == "tmp"),
-            modified: fs::metadata(&path)?.modified()?,
+            modified: metadata.modified()?,
             key,
             path,
-        })
+        }))
     }
 }
 

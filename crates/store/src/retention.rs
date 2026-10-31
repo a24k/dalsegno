@@ -1,6 +1,7 @@
 //! Retention holds and what the sweep may remove (D-11, D-12).
 
 use crate::database::{Database, StoreError};
+use crate::features::ENVELOPE_FEATURE;
 use rusqlite::params;
 
 const DAY_MS: i64 = 24 * 3600 * 1000;
@@ -78,33 +79,41 @@ impl Database {
         Ok(())
     }
 
-    /// Returns fragments past retention and under no live hold, up to `limit`.
+    /// Returns fragments past retention and under no live hold, in key order after `after`.
     ///
     /// Audio has base retention until `audio_cutoff`. Other formats have none.
     pub fn sweep_candidates(
         &self,
         audio_cutoff: i64,
         now: i64,
+        after: Option<SweepItem>,
         limit: u32,
     ) -> Result<Vec<SweepItem>, StoreError> {
+        let (after_stream, after_itag, after_sq) = after.map_or((i64::MIN, 0, -1), |item| {
+            (item.stream_id, item.itag, item.sq as i64)
+        });
         let mut statement = self.connection.prepare_cached(
             "SELECT f.stream_id, f.itag, f.sq FROM fragments f \
              JOIN streams s ON s.id = f.stream_id \
-             WHERE (f.itag != s.audio_itag OR f.fetched_at < ?1) \
+             WHERE (f.stream_id, f.itag, f.sq) > (?3, ?4, ?5) \
+             AND (f.itag != s.audio_itag OR f.fetched_at < ?1) \
              AND NOT EXISTS (SELECT 1 FROM retention_holds h \
                WHERE h.stream_id = f.stream_id AND h.itag = f.itag \
                AND f.sq BETWEEN h.sq_first AND h.sq_last \
                AND (h.expires_at IS NULL OR h.expires_at > ?2)) \
-             LIMIT ?3",
+             ORDER BY f.stream_id, f.itag, f.sq LIMIT ?6",
         )?;
         let items = statement
-            .query_map(params![audio_cutoff, now, limit], |row| {
-                Ok(SweepItem {
-                    stream_id: row.get(0)?,
-                    itag: row.get(1)?,
-                    sq: row.get::<_, i64>(2)? as u64,
-                })
-            })?
+            .query_map(
+                params![audio_cutoff, now, after_stream, after_itag, after_sq, limit],
+                |row| {
+                    Ok(SweepItem {
+                        stream_id: row.get(0)?,
+                        itag: row.get(1)?,
+                        sq: row.get::<_, i64>(2)? as u64,
+                    })
+                },
+            )?
             .collect::<Result<_, _>>()?;
         Ok(items)
     }
@@ -117,9 +126,9 @@ impl Database {
                 params![item.stream_id, item.itag, item.sq as i64],
             )?;
             transaction.execute(
-                "DELETE FROM envelope WHERE stream_id = ?1 AND sq = ?3 \
+                "DELETE FROM envelope WHERE stream_id = ?1 AND feature = ?4 AND sq = ?3 \
                  AND ?2 = (SELECT audio_itag FROM streams WHERE id = ?1)",
-                params![item.stream_id, item.itag, item.sq as i64],
+                params![item.stream_id, item.itag, item.sq as i64, ENVELOPE_FEATURE],
             )?;
             Ok(())
         })
@@ -151,7 +160,7 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::{ENVELOPE_FEATURE, EnvelopeRow};
+    use crate::features::EnvelopeRow;
     use crate::fragments::tests::{fragment, stream};
     use crate::fragments::{FragmentRow, HeadSample};
 
@@ -205,13 +214,30 @@ mod tests {
 
     fn sqs(database: &Database) -> Vec<u64> {
         let mut found: Vec<u64> = database
-            .sweep_candidates(CUTOFF, NOW, 100)
+            .sweep_candidates(CUTOFF, NOW, None, 100)
             .unwrap()
             .iter()
             .map(|item| item.sq)
             .collect();
         found.sort_unstable();
         found
+    }
+
+    #[test]
+    fn candidates_page_in_key_order() {
+        let database = Database::open_in_memory().unwrap();
+        let id = stream(&database);
+        for sq in [3, 1, 2] {
+            database.put_fragment(&old(id, AUDIO, sq)).unwrap();
+        }
+
+        let first = database.sweep_candidates(CUTOFF, NOW, None, 2).unwrap();
+        let rest = database
+            .sweep_candidates(CUTOFF, NOW, first.last().copied(), 2)
+            .unwrap();
+
+        let page = |items: &[SweepItem]| items.iter().map(|item| item.sq).collect::<Vec<_>>();
+        assert_eq!((page(&first), page(&rest)), (vec![1, 2], vec![3]));
     }
 
     #[test]
@@ -244,7 +270,7 @@ mod tests {
         }
         database.put_fragment(&old(id, AUDIO, 5)).unwrap();
 
-        let items = database.sweep_candidates(CUTOFF, NOW, 100).unwrap();
+        let items = database.sweep_candidates(CUTOFF, NOW, None, 100).unwrap();
 
         assert_eq!(items.len(), 3);
         assert!(

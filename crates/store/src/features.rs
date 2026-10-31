@@ -129,7 +129,7 @@ impl Database {
     ) -> Result<(), StoreError> {
         self.transaction(|transaction| {
             transaction.execute(
-                "UPDATE feature_runs SET next_sq = ?2 WHERE id = ?1",
+                "UPDATE feature_runs SET next_sq = MAX(next_sq, ?2) WHERE id = ?1",
                 params![run.id, following.next_sq as i64],
             )?;
             transaction.execute("DELETE FROM feature_runs WHERE id = ?1", [following.id])?;
