@@ -205,7 +205,7 @@ fragments each carry their own header and arrive for days.
 **Decision.** A small hand-written reader extracts `tfdt`, sample sizes and the AAC
 `AudioSpecificConfig` from each fragment, plus Cluster Timecode for WebM. Raw AAC packets
 go straight to symphonia's AAC decoder. ffmpeg stays as a fallback for the offline path.
-Spike S2 validates this.
+Spike S2 confirmed this: decoded audio matches ffmpeg at 132 dB SNR.
 
 ### D-22 Correlation and offset voting are written in-house
 

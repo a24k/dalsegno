@@ -15,7 +15,8 @@ flowchart LR
 
 ## M0 Scaffold and spikes
 
-Added to the brief's plan, to retire the unverified assumptions cheaply.
+Added to the brief's plan, to retire the unverified assumptions cheaply. Results are in
+[reference/m0-spikes.md](reference/m0-spikes.md).
 
 - Cargo workspace, lints, `rustfmt`, CI (fmt, clippy, test, coverage).
 - `DALSEGNO_FIXTURES` handling (D-19).
@@ -27,7 +28,7 @@ Added to the brief's plan, to retire the unverified assumptions cheaply.
 | S3 | Do `tfdt` and Cluster Timecode equal ffprobe `start_time`? | Investigate timescale handling. |
 | S4 | Is in-process 2 kHz envelope close to Python's? The Python bins start at the first decoded sample, not on the stream-time grid, so align by offset first. | Accept high correlation instead of equality, and record it. |
 
-**Exit:** a short note in `docs/reference/` per spike, and D-21 confirmed or revised.
+**Exit:** spike results recorded in `docs/reference/`, and D-21 confirmed or revised.
 
 ## M1 Acquisition
 

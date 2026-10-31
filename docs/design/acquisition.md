@@ -50,7 +50,7 @@ Response classification, applied in one pure function so it can be unit tested:
 | 200 with body | Success. Capture head headers. |
 | 200 empty | `Retryable`, counted towards the family failure. |
 | 403 | `RefreshUrl`. Repeat after refresh: switch family. Repeat after switch: `error`. |
-| 404 at or past head | `NotYet` (confirm in spike S1). |
+| 404 past head | `NotYet`, resynchronise from `X-Head-Seqnum`. |
 | 404 older than the DVR | `Lost`, recorded as a gap. |
 | 429, 503, 5xx | `Backoff`, exponential with jitter. |
 
@@ -76,13 +76,13 @@ start or resume:
 loop:
   fetch follow_sq, record head headers
   on success, advance follow_sq in the same transaction as the fragment row
-  if follow_sq <= head: continue, subject to the rate limiter
-  otherwise sleep one fragment duration
   if follow_sq falls too far behind: record a gap, jump to head
 ```
 
-Only `sq` values at or below the reported head are requested, until spike S1 establishes
-what the origin does beyond it. Head samples are stored at most once a minute.
+The origin holds a request just past the head until the fragment exists, so the loop needs
+no timer ([spike S1](../reference/m0-spikes.md#s1-origin-behaviour-around-the-head)). The
+request timeout is 30 s, several fragment durations. Head samples are stored at most once a
+minute.
 
 If the head does not advance, or yt-dlp reports the stream finished, the supervisor
 confirms over a few attempts before moving to `ended`.

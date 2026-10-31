@@ -23,9 +23,9 @@ audio fragment -> container reader -> AAC packets -> decoder (one per contiguous
 - **Filled gaps.** A fill becomes a run that also recomputes the first fragment after the
   gap, which was decoded without its predecessor, and then merges with the following run.
 
-Resampling to 2 kHz must match ffmpeg closely enough for the comparison with the existing
-Python envelopes, the acceptance test for FR-N1. If matching in process is impractical,
-compare correlation with the reference rather than exact values, and record the result.
+Resampling uses a windowed-sinc filter rather than reproducing ffmpeg's exactly. FR-N1 is
+accepted against the Python envelopes by the thresholds in
+[spike S4](../reference/m0-spikes.md#s4-envelope).
 
 ## Series
 
