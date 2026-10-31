@@ -154,6 +154,61 @@ fn a_net_zero_replacement_of_a_song_is_new() {
     assert!(classes(&diff).contains(&RegionClass::Deleted));
 }
 
+/// A cycle of songs apart from two flat videos, whose level alone says they are the same audio.
+fn cycle_with_middle(middle: &[f32], noise: u64) -> Vec<f32> {
+    let gap = vec![0.0; 20];
+    let flat = |seed: u64| -> Vec<f32> {
+        content(seed, 600.0)
+            .iter()
+            .map(|value| 9.0 + (value - 8.0) * 0.25)
+            .collect()
+    };
+    [
+        content(50, 1000.0).as_slice(),
+        &gap,
+        &flat(noise),
+        &gap,
+        middle,
+        &gap,
+        &flat(noise + 1),
+        &gap,
+        content(51, 1000.0).as_slice(),
+    ]
+    .concat()
+}
+
+#[test]
+fn a_replaced_video_is_new_and_the_videos_around_it_are_not() {
+    let old = cycle_with_middle(&content(52, 200.0), 60);
+    let new = cycle_with_middle(&content(53, 200.0), 70);
+
+    let diff = compare_cycles(&old, &new);
+
+    let added = region(&diff, RegionClass::New);
+    assert!((added.start - 1603.0).abs() < 5.0, "{:?}", diff.regions);
+    assert!((added.end - 1805.0).abs() < 5.0, "{:?}", diff.regions);
+    assert_eq!(
+        classes(&diff)
+            .iter()
+            .filter(|class| **class == RegionClass::New)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn an_insertion_gives_back_the_videos_at_either_end() {
+    let gap = vec![0.0; 20];
+    let old = [content(55, 1000.0), gap.clone(), content(56, 1000.0)].concat();
+    let new = [&old[..10_020], &content(57, 300.0), &gap, &old[10_000..]].concat();
+
+    let diff = compare_cycles(&old, &new);
+
+    let added = region(&diff, RegionClass::New);
+    assert!((added.start - 1001.0).abs() < 5.0, "{:?}", diff.regions);
+    assert!((added.end - 1303.0).abs() < 5.0, "{:?}", diff.regions);
+}
+
 #[test]
 fn silence_is_no_data_and_not_new() {
     let old = content(52, P);

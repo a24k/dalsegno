@@ -5,8 +5,8 @@
 //! enough for analysis (roadmap, M3 exit).
 
 use dalsegno_core::analysis::{
-    DiffConfig, PeriodConfig, PeriodEstimate, Prepared, RegionClass, Series, Signal, TrackConfig,
-    VersionCycle, compare, detect_signals, estimate_period, summarise, track,
+    DiffConfig, PeriodConfig, PeriodEstimate, Prepared, Region, RegionClass, Series, Signal,
+    TrackConfig, VersionCycle, compare, detect_signals, estimate_period, summarise, track,
 };
 use dalsegno_test_support::{read_npy_f32, require_fixtures};
 use std::env;
@@ -215,6 +215,37 @@ const TRIAL_SPACING: f64 = 700.0;
 const NEW_AUDIO: (f64, f64) = (12_790_100.0, 12_793_500.0);
 const SOURCE_STEP: f64 = 137.0;
 
+/// Compares an edited 10/31 cycle with the previous version, and returns the new regions that
+/// lie where the two versions otherwise match.
+fn new_regions_within_stretches(previous: &Prepared, edited: &[f32]) -> Vec<Region> {
+    let current = prepare(LATEST_START, edited);
+    let config = DiffConfig::default();
+    let versions = [VersionCycle {
+        id: 1,
+        data: previous,
+        start: previous.end_time() - AFTER_INSERTION_PERIOD - config.window,
+        period: AFTER_INSERTION_PERIOD,
+    }];
+    let start = current.end_time() - VERSION_1031_PERIOD - config.window;
+    let diff = compare(
+        &current,
+        start,
+        VERSION_1031_PERIOD,
+        &versions,
+        &[],
+        &config,
+    );
+    diff.regions
+        .into_iter()
+        .filter(|region| region.class == RegionClass::New)
+        .filter(|region| {
+            EXISTING_STRETCHES
+                .iter()
+                .any(|(a, b)| region.start >= *a && region.end <= *b)
+        })
+        .collect()
+}
+
 /// Overwrites stretches of real audio with other real audio of the same length, which makes
 /// net-zero replacements with a known answer. Returns (found, trials, false regions).
 fn replacement_trial(seconds: f64) -> (usize, usize, usize) {
@@ -235,36 +266,9 @@ fn replacement_trial(seconds: f64) -> (usize, usize, usize) {
             time += TRIAL_SPACING;
         }
     }
-    let current = prepare(LATEST_START, &edited);
-    let config = DiffConfig::default();
-    let versions = [VersionCycle {
-        id: 1,
-        data: &previous,
-        start: previous.end_time() - AFTER_INSERTION_PERIOD - config.window,
-        period: AFTER_INSERTION_PERIOD,
-    }];
-    let start = current.end_time() - VERSION_1031_PERIOD - config.window;
-    let diff = compare(
-        &current,
-        start,
-        VERSION_1031_PERIOD,
-        &versions,
-        &[],
-        &config,
-    );
-    let new_regions: Vec<_> = diff
-        .regions
-        .iter()
-        .filter(|region| region.class == RegionClass::New)
-        .filter(|region| {
-            EXISTING_STRETCHES
-                .iter()
-                .any(|(a, b)| region.start >= *a && region.end <= *b)
-        })
-        .collect();
-    let overlap = |region: &dalsegno_core::analysis::Region, plant: &(f64, f64)| {
-        region.end.min(plant.1) - region.start.max(plant.0)
-    };
+    let new_regions = new_regions_within_stretches(&previous, &edited);
+    let overlap =
+        |region: &Region, plant: &(f64, f64)| region.end.min(plant.1) - region.start.max(plant.0);
     let found = planted
         .iter()
         .filter(|plant| {
@@ -300,6 +304,101 @@ fn net_zero_replacements_on_real_audio() {
         assert!(found as f64 >= wanted * trials as f64, "{found}/{trials}");
         assert_eq!(stray, 0);
     }
+}
+
+/// Envelope level below which audio has stopped, as it does between videos.
+const SILENT_LEVEL: f32 = 1.0;
+const SILENT_BINS: usize = 3;
+/// Lengths of the videos to replace, in seconds.
+const VIDEO_SECONDS: (f64, f64) = (60.0, 400.0);
+/// Keeps a replaced video well inside a stretch, so nothing else changes near it.
+const VIDEO_MARGIN: f64 = 300.0;
+/// Replaced videos are this many videos apart, so that each is judged alone.
+const VIDEO_STRIDE: usize = 3;
+/// How far a reported edge may stray from the edge of the replaced video, in seconds.
+const MAX_EDGE_ERROR: f64 = 30.0;
+const MIN_EDGES_WITHIN: f64 = 0.9;
+
+/// Returns the times where audio stops, from an independent reading of the envelope.
+fn silent_stretches(values: &[f32]) -> Vec<(f64, f64)> {
+    let time = |index: usize| LATEST_START + index as f64 / RATE;
+    let silent: Vec<usize> = (0..values.len())
+        .filter(|index| values[*index] < SILENT_LEVEL)
+        .collect();
+    silent
+        .chunk_by(|a, b| b - a == 1)
+        .filter(|run| run.len() >= SILENT_BINS)
+        .map(|run| (time(run[0]), time(run[run.len() - 1] + 1)))
+        .collect()
+}
+
+/// Overwrites whole videos, from the end of one silence to the start of the next, with other
+/// real audio of the same length.
+fn replace_videos(newer: &[f32]) -> (Vec<f32>, Vec<(f64, f64)>) {
+    let index = |time: f64| ((time - LATEST_START) * RATE) as usize;
+    let silences = silent_stretches(newer);
+    let inside = |start: f64, end: f64| {
+        EXISTING_STRETCHES
+            .iter()
+            .any(|(a, b)| start >= a + VIDEO_MARGIN && end <= b - VIDEO_MARGIN)
+    };
+    let videos: Vec<(f64, f64)> = silences
+        .windows(2)
+        .map(|pair| (pair[0].1, pair[1].0))
+        .filter(|(start, end)| {
+            (VIDEO_SECONDS.0..=VIDEO_SECONDS.1).contains(&(end - start)) && inside(*start, *end)
+        })
+        .collect();
+    let chosen: Vec<(f64, f64)> = videos.iter().copied().step_by(VIDEO_STRIDE).collect();
+    let mut edited = newer.to_vec();
+    for (number, (start, end)) in chosen.iter().enumerate() {
+        let span = NEW_AUDIO.1 - NEW_AUDIO.0 - (end - start);
+        let source = index(NEW_AUDIO.0 + (number as f64 * SOURCE_STEP) % span);
+        let (at, length) = (index(*start), index(*end) - index(*start));
+        edited[at..at + length].copy_from_slice(&newer[source..source + length]);
+    }
+    (edited, chosen)
+}
+
+#[test]
+fn replaced_videos_are_reported_with_their_own_edges() {
+    require_fixtures!();
+    let older = envelope("env-recent.npy").expect("env-recent.npy");
+    let newer = envelope("env-1031.npy").expect("env-1031.npy");
+    let previous = prepare(RECENT_START, &older);
+    let (edited, videos) = replace_videos(&newer);
+
+    let regions = new_regions_within_stretches(&previous, &edited);
+
+    let errors: Vec<(f64, f64)> = videos
+        .iter()
+        .filter_map(|(start, end)| {
+            let hit = regions
+                .iter()
+                .find(|region| region.end.min(*end) - region.start.max(*start) > 0.0)?;
+            Some((start - hit.start, hit.end - end))
+        })
+        .collect();
+    println!(
+        "{} videos, {} found: {errors:.0?}",
+        videos.len(),
+        errors.len()
+    );
+    let within = errors
+        .iter()
+        .filter(|(before, after)| before.abs().max(after.abs()) <= MAX_EDGE_ERROR)
+        .count();
+    assert!(videos.len() >= 10, "{}", videos.len());
+    assert!(
+        within as f64 >= MIN_EDGES_WITHIN * videos.len() as f64,
+        "{within}"
+    );
+    let stray = regions.iter().filter(|region| {
+        !videos
+            .iter()
+            .any(|(start, end)| region.end.min(*end) - region.start.max(*start) > 0.0)
+    });
+    assert_eq!(stray.count(), 0);
 }
 
 /// (seconds, share found at least) for the same trials through tracking.

@@ -2,7 +2,8 @@
 
 use super::super::same_audio::{compare_audio, is_same_audio};
 use super::super::series::Prepared;
-use super::{DiffConfig, Region, Span, VersionCycle, Window};
+use super::reclaim::{join_regions, reclaim_videos};
+use super::{DiffConfig, Found, Region, Span, VersionCycle, Window};
 
 /// Moves the edges of matched regions from window precision to about a second.
 ///
@@ -19,13 +20,7 @@ pub(super) fn refine_edges(
         .zip(spans)
         .map(|(region, span)| match span.window {
             Window::Found(found) => {
-                let comparison = EdgeComparison {
-                    current,
-                    earlier: versions[found.version].data,
-                    period: versions[found.version].period,
-                    offset: found.offset,
-                    config,
-                };
+                let comparison = EdgeComparison::at(found, current, versions, config);
                 Region {
                     start: comparison.move_start(region.start),
                     end: comparison.move_end(region.end),
@@ -35,7 +30,8 @@ pub(super) fn refine_edges(
             Window::NoData | Window::NoMatch => *region,
         })
         .collect();
-    settle(&moved, config)
+    let reclaimed = reclaim_videos(&moved, spans, current, versions, config);
+    join_regions(&settle(&reclaimed, config), versions, config)
 }
 
 /// Makes neighbouring regions meet, and drops the slivers left between matched regions.
@@ -79,7 +75,23 @@ pub(super) struct EdgeComparison<'a> {
     pub(super) config: &'a DiffConfig,
 }
 
-impl EdgeComparison<'_> {
+impl<'a> EdgeComparison<'a> {
+    /// Compares at the shift of a match.
+    pub(super) fn at(
+        found: Found,
+        current: &'a Prepared,
+        versions: &[VersionCycle<'a>],
+        config: &'a DiffConfig,
+    ) -> Self {
+        Self {
+            current,
+            earlier: versions[found.version].data,
+            period: versions[found.version].period,
+            offset: found.offset,
+            config,
+        }
+    }
+
     fn move_end(&self, end: f64) -> f64 {
         const STEP: f64 = 1.0;
         let window = self.config.edge_window;

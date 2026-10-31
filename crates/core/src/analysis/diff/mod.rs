@@ -10,6 +10,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 mod edges;
+mod reclaim;
 
 /// Comparison parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -402,14 +403,7 @@ impl Bridge<'_> {
         let config = self.config;
         let time = self.start + span.first as f64 * config.step;
         let seconds = (span.last - span.first) as f64 * config.step + config.window;
-        let comparison = EdgeComparison {
-            current: self.current,
-            earlier: self.versions[shift.version].data,
-            period: self.versions[shift.version].period,
-            offset: shift.offset,
-            config,
-        };
-        comparison.is_same(time, seconds)
+        EdgeComparison::at(shift, self.current, self.versions, config).is_same(time, seconds)
     }
 }
 
@@ -440,7 +434,9 @@ fn bridge_gaps(spans: Vec<Span>, bridge: &Bridge<'_>) -> Vec<Span> {
                 last: spans[next].first.saturating_sub(1),
                 ..current
             };
-            if next > index && !bridge.holds(&gap, found) {
+            // Equal shifts can differ by the shift tolerance, so either side may hold the right one.
+            let holds = |side: Option<Found>| side.is_some_and(|shift| bridge.holds(&gap, shift));
+            if next > index && !holds(Some(found)) && !holds(lasting(&spans[next])) {
                 break;
             }
             current.last = spans[next].last;

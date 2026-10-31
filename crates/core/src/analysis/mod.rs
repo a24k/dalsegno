@@ -8,6 +8,7 @@ mod series;
 #[cfg(test)]
 mod synthetic;
 mod tracking;
+mod videos;
 
 pub use diff::{
     Diff, DiffConfig, KnownClip, Region, RegionClass, SelfCheck, VersionCycle, compare, locate_clip,
