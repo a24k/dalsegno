@@ -237,34 +237,52 @@ fn a_registered_clip_is_known_and_not_new() {
 }
 
 #[test]
-fn a_brief_flip_does_not_split_a_region() {
-    let found = |shift| {
-        Window::Found(Found {
-            version: 0,
-            shift,
-            position: 0.0,
-            offset: 0.0,
-        })
-    };
-    let previous = prepared(&content(10, 100.0));
-    let versions = [version(&previous, 1, P)];
-    let items = [
-        found(100.0),
-        found(100.0),
-        found(100.0),
-        found(900.0),
-        found(100.0),
-        found(100.0),
-        found(100.0),
-    ];
-    let config = DiffConfig {
-        min_windows: 3,
-        ..DiffConfig::default()
+fn a_brief_match_elsewhere_does_not_split_a_region() {
+    let old = content(10, P);
+    let clip = old[20_000..21_000].to_vec();
+    let mut repeated = old.clone();
+    repeated[5_000..6_000].copy_from_slice(&clip);
+
+    let diff = compare_cycles(&repeated, &repeated);
+
+    assert_eq!(
+        classes(&diff),
+        [RegionClass::Existing],
+        "{:?}",
+        diff.regions
+    );
+}
+
+#[test]
+fn a_position_past_the_stored_audio_is_found_one_period_back() {
+    let data = prepared(&content(14, 1000.0));
+    let config = DiffConfig::default();
+    let comparison = EdgeComparison {
+        current: &data,
+        earlier: &data,
+        period: 400.0,
+        offset: -700.0,
+        config: &config,
     };
 
-    let spans = consolidate(group(&items, &versions, &config), &versions, &config);
+    assert_eq!(comparison.earlier_time(200.0, 60.0), 900.0);
+    assert_eq!(comparison.earlier_time(350.0, 60.0), 650.0);
+}
 
-    assert_eq!(spans.len(), 1);
+#[test]
+fn a_replacement_by_material_found_elsewhere_is_not_bridged() {
+    let old = content(13, P);
+    let clip = old[20_000..22_110].to_vec();
+    let mut new = old.clone();
+    new[5_000..7_110].copy_from_slice(&clip);
+
+    let diff = compare_cycles(&old, &new);
+
+    assert!(
+        classes(&diff).contains(&RegionClass::New),
+        "{:?}",
+        diff.regions
+    );
 }
 
 #[test]

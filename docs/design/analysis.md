@@ -122,9 +122,14 @@ Baseline, from measured-facts section 4.5:
 4. Convert to `shift = t_new − t_old`, and detect where shift changes. A shift held for under
    5 minutes is a brief flip, because repeated material matches its other occurrences for as
    long as it plays.
-   Between equal shifts, a flip is bridged, and so is silence or a recording gap of any length,
-   but at most 5 unmatched windows, about 150 s, which matches the limit of D-04. More than that
-   is a net-zero replacement, and less can be a quiet scene.
+   Silence or a gap between equal shifts is bridged. Any other gap between two lasting regions
+   of one shift is judged as a whole at that shift, within 0.2 s because bins of two versions
+   differ in phase: correlation of at least 0.3 and mean absolute difference of at most 0.35
+   mean the same audio. This is one comparison, so it can be far weaker than a search over a
+   cycle, and flat, loud music needs it, as its correlation collapses while its level stays
+   close. Otherwise the gap is a replacement, which keeps the shift. Replacements of 90 s and
+   longer are mostly found, as [the verification](../reference/m3-verification.md#replacements)
+   measures.
 5. Move region edges to about 3 s, by walking outwards from inside the region at a fixed shift
    with a 5-second window. A 60-second window straddling an edge matches nothing, or matches past
    the true edge.

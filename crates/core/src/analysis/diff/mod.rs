@@ -19,9 +19,12 @@ pub struct DiffConfig {
     pub threshold: f32,
     /// Shifts within this many seconds belong to one region.
     pub shift_tolerance: f64,
-    /// Unmatched windows between equal shifts that are bridged, as quiet scenes match poorly.
-    /// More than this is a replacement, which keeps the shift the same.
-    pub max_bridged_unmatched: usize,
+    /// Correlation at a known shift that bridges a stretch between equal shifts. This is one
+    /// comparison and not a search over a cycle, so far weaker evidence is enough.
+    pub bridge_correlation: f64,
+    /// Mean absolute difference at a known shift above which audio is not the same. Flat, loud
+    /// music correlates poorly with itself, but its level stays close.
+    pub bridge_difference: f64,
     /// A shift held for fewer windows is a brief flip. This must outlast repeated material,
     /// which matches its other occurrences for as long as it plays.
     pub min_windows: usize,
@@ -46,7 +49,8 @@ impl Default for DiffConfig {
             step: 30.0,
             threshold: 0.7,
             shift_tolerance: 3.0,
-            max_bridged_unmatched: 5,
+            bridge_correlation: 0.3,
+            bridge_difference: 0.35,
             min_windows: 10,
             check_tolerance: 5.0,
             min_deleted_seconds: 60.0,
@@ -178,7 +182,14 @@ pub fn compare(
     config: &DiffConfig,
 ) -> Diff {
     let found = match_windows(current, start, period, versions, config);
-    let spans = consolidate(group(&found, versions, config), versions, config);
+    let grouped = group(&found, versions, config);
+    let bridge = Bridge {
+        current,
+        versions,
+        start,
+        config,
+    };
+    let spans = consolidate(grouped, &bridge);
     let centre = |index: usize| start + index as f64 * config.step + config.window / 2.0;
     let edge = |span: &Span| {
         (
@@ -383,9 +394,83 @@ fn same_span(a: Window, b: Window, versions: &[VersionCycle<'_>], config: &DiffC
     }
 }
 
-/// Drops brief flips, then joins what they separated.
-fn consolidate(spans: Vec<Span>, versions: &[VersionCycle<'_>], config: &DiffConfig) -> Vec<Span> {
+const BRIDGE_NUDGES: [f64; 5] = [0.0, -0.1, 0.1, -0.2, 0.2];
+
+/// Decides whether a stretch between two equal shifts is the same audio.
+struct Bridge<'a> {
+    current: &'a Prepared,
+    versions: &'a [VersionCycle<'a>],
+    start: f64,
+    config: &'a DiffConfig,
+}
+
+impl Bridge<'_> {
+    fn holds(&self, span: &Span, shift: Found) -> bool {
+        let config = self.config;
+        let time = self.start + span.first as f64 * config.step;
+        let seconds = (span.last - span.first) as f64 * config.step + config.window;
+        // Bins of two versions sit up to a bin apart, which inflates the difference wherever
+        // the level moves fast, so the nearest offsets are tried too.
+        BRIDGE_NUDGES.iter().any(|nudge| {
+            let comparison = EdgeComparison {
+                current: self.current,
+                earlier: self.versions[shift.version].data,
+                period: self.versions[shift.version].period,
+                offset: shift.offset + nudge,
+                config,
+            };
+            comparison
+                .compare_at(time, seconds)
+                .is_some_and(|(score, difference)| {
+                    score >= config.bridge_correlation && difference <= config.bridge_difference
+                })
+        })
+    }
+}
+
+/// Merges everything between two lasting spans of one shift when the audio there is the same.
+///
+/// Repeated material can match elsewhere for longer than `min_windows`, so the whole gap is
+/// judged at once, and not span by span.
+fn bridge_gaps(spans: Vec<Span>, bridge: &Bridge<'_>) -> Vec<Span> {
+    let (versions, config) = (bridge.versions, bridge.config);
+    let lasting = |span: &Span| match span.window {
+        Window::Found(found) if span.last - span.first + 1 >= config.min_windows => Some(found),
+        _ => None,
+    };
+    let mut merged: Vec<Span> = Vec::new();
+    let mut index = 0;
+    while index < spans.len() {
+        let mut current = spans[index];
+        index += 1;
+        while let Some(found) = lasting(&current) {
+            let same_shift = |span: &Span| {
+                lasting(span).is_some_and(|other| same_key(found, other, versions, config))
+            };
+            let Some(next) = (index..spans.len()).find(|at| same_shift(&spans[*at])) else {
+                break;
+            };
+            let gap = Span {
+                first: current.last + 1,
+                last: spans[next].first.saturating_sub(1),
+                ..current
+            };
+            if next > index && !bridge.holds(&gap, found) {
+                break;
+            }
+            current.last = spans[next].last;
+            index = next + 1;
+        }
+        merged.push(current);
+    }
+    merged
+}
+
+/// Drops brief flips, and keeps what stayed unmatched apart from what had no data.
+fn consolidate(spans: Vec<Span>, bridge: &Bridge<'_>) -> Vec<Span> {
+    let (versions, config) = (bridge.versions, bridge.config);
     let width = |span: &Span| span.last - span.first + 1;
+    let spans = bridge_gaps(spans, bridge);
     let lasting: Vec<Option<Found>> = spans
         .iter()
         .map(|span| match span.window {
@@ -397,21 +482,15 @@ fn consolidate(spans: Vec<Span>, versions: &[VersionCycle<'_>], config: &DiffCon
     for (index, span) in spans.iter().enumerate() {
         let previous = lasting[..index].iter().rev().find_map(|found| *found);
         let next = lasting[index + 1..].iter().find_map(|found| *found);
-        let window = match (span.window, previous, next) {
-            (_, _, _) if lasting[index].is_some() => span.window,
-            (Window::NoMatch, Some(a), Some(b))
-                if width(span) <= config.max_bridged_unmatched
-                    && same_key(a, b, versions, config) =>
-            {
-                Window::Found(a)
-            }
-            (Window::NoData | Window::Found(_), Some(a), Some(b))
-                if same_key(a, b, versions, config) =>
-            {
-                Window::Found(a)
-            }
-            (Window::Found(_), _, _) => Window::NoMatch,
-            (other, _, _) => other,
+        let around = previous
+            .zip(next)
+            .filter(|(a, b)| same_key(*a, *b, versions, config))
+            .map(|(a, _)| a);
+        let window = match (span.window, around) {
+            _ if lasting[index].is_some() => span.window,
+            (Window::NoData, Some(shift)) => Window::Found(shift),
+            (Window::Found(_), _) => Window::NoMatch,
+            (other, _) => other,
         };
         match result.last_mut() {
             Some(last) if same_span(last.window, window, versions, config) => last.last = span.last,
@@ -471,6 +550,7 @@ fn refine_edges(
                 let comparison = EdgeComparison {
                     current,
                     earlier: versions[found.version].data,
+                    period: versions[found.version].period,
                     offset: found.offset,
                     config,
                 };
@@ -522,6 +602,7 @@ fn settle(regions: &[Region], config: &DiffConfig) -> Vec<Region> {
 struct EdgeComparison<'a> {
     current: &'a Prepared,
     earlier: &'a Prepared,
+    period: f64,
     offset: f64,
     config: &'a DiffConfig,
 }
@@ -557,27 +638,45 @@ impl EdgeComparison<'_> {
 
     /// Silence says nothing, so it lets the edge pass, up to the limit.
     fn agrees_at(&self, time: f64) -> bool {
-        let length = self.current.samples(self.config.edge_window);
-        let (Some(a), Some(b)) = (
-            self.current.index_of(time),
-            self.earlier.index_of(time - self.offset),
-        ) else {
-            return false;
-        };
+        self.compare_at(time, self.config.edge_window)
+            .is_some_and(|(score, _)| score >= self.config.edge_threshold)
+    }
+
+    /// Returns where `time` falls in the earlier series. It loops, so a position past the
+    /// stored audio is found one period back.
+    fn earlier_time(&self, time: f64, seconds: f64) -> f64 {
+        let position = time - self.offset;
+        let overrun = position + seconds - self.earlier.end_time();
+        if overrun > 0.0 {
+            position - (overrun / self.period).ceil() * self.period
+        } else {
+            position
+        }
+    }
+
+    /// Returns the correlation and mean absolute difference of `seconds` of audio at the
+    /// offset. Windows too flat to correlate score 1, as they are no evidence against.
+    fn compare_at(&self, time: f64, seconds: f64) -> Option<(f64, f64)> {
+        let length = self.current.samples(seconds);
+        let a = self.current.index_of(time)?;
+        let b = self.earlier.index_of(self.earlier_time(time, seconds))?;
         if a + length > self.current.len() || b + length > self.earlier.len() {
-            return false;
+            return None;
         }
         let (mean_a, deviation_a) = self.current.stats(a, length);
         let (mean_b, deviation_b) = self.earlier.stats(b, length);
-        if deviation_a < MIN_REFERENCE_DEVIATION || deviation_b < MIN_REFERENCE_DEVIATION {
-            return true;
-        }
-        let product: f64 = self.current.filled[a..a + length]
+        let pairs = self.current.filled[a..a + length]
             .iter()
-            .zip(&self.earlier.filled[b..b + length])
-            .map(|(x, y)| (x - mean_a) * (y - mean_b))
-            .sum();
-        product / (length as f64 * deviation_a * deviation_b) >= self.config.edge_threshold
+            .zip(&self.earlier.filled[b..b + length]);
+        let difference = pairs.clone().map(|(x, y)| (x - y).abs()).sum::<f64>() / length as f64;
+        if deviation_a < MIN_REFERENCE_DEVIATION || deviation_b < MIN_REFERENCE_DEVIATION {
+            return Some((1.0, difference));
+        }
+        let product: f64 = pairs.map(|(x, y)| (x - mean_a) * (y - mean_b)).sum();
+        Some((
+            product / (length as f64 * deviation_a * deviation_b),
+            difference,
+        ))
     }
 }
 
