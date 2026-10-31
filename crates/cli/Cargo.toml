@@ -15,6 +15,10 @@ anyhow.workspace = true
 clap.workspace = true
 dalsegno-app.workspace = true
 dalsegno-server.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
