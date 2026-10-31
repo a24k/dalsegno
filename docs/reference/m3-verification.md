@@ -56,8 +56,8 @@ Three problems showed only on the real envelopes.
 - The second self-check mostly restates the first, as [analysis.md](../design/analysis.md#self-checks)
   explains.
 - A replacement shorter than about 150 s between equal shifts is bridged as a quiet scene, the
-  same limit as D-04. Real quiet scenes needed this: at a limit of 60 s, three false new regions
-  of 120 to 159 s appeared.
+  same limit as D-04. At a limit of 60 s, three new regions of 120 to 159 s appeared at unchanged
+  shifts. They are taken to be quiet scenes, which nobody has confirmed by watching them.
 - A hole in a stored version's cycle reads as a mismatch, not as no data. Holds keep whole cycles
   (D-11), so a stored version should have none, and nothing checks that yet.
 - Known clips have run on synthetic data only, from a file. Registering them in the database
