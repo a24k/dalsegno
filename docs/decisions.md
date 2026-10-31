@@ -46,7 +46,9 @@ leaves a 3:31 song with at most two wholly unmatched points. Add an *unmatched r
 signal: four or more consecutive points, non-silent in the reference window, with no
 match at any lag in range. This remains robust against the silence problem because
 silent reference windows are skipped rather than scored. Sections shorter than about
-150 s can still go unnoticed until the harness sets a better threshold.
+150 s can still go unnoticed until the harness sets a better threshold. Milestone 3 replaced
+counting points with judging the stretch at the known lag, because on real audio the count
+missed most replacements, and measured about 90% at 120 s.
 
 ### D-05 Silent reference windows are skipped
 

@@ -3,6 +3,7 @@
 mod diff;
 mod ncc;
 mod period;
+mod same_audio;
 mod series;
 #[cfg(test)]
 mod synthetic;

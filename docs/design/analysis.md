@@ -89,10 +89,12 @@ Evaluated after each tracking pass:
 | Signal | Condition | Meaning |
 | --- | --- | --- |
 | Lag shift | A run of at least 10 minutes settles at `P + Δ`, `Δ ≠ 0` | Net change of Δ. |
-| Unmatched run | At least 4 consecutive points of `NoMatch`, not `NoData` (D-04) | New content, including a net-zero replacement. |
+| Unmatched run | A stretch of at least 4 points after a lasting lag that is not the same audio at that lag, or at least 4 consecutive `NoMatch` points where no lag applies. `NoData` splits a stretch and never counts (D-04, D-05). | New content, including a net-zero replacement. |
 | Lost track | No stable run for 30 minutes | Widen the search until a run stabilises (D-01), and treat the interval as a transition (D-09). |
 
-Score drops alone never fire. After any signal, the old and new period comparison at 5 s
+A lasting lag holds for 10 points, longer than repeated material plays. Single points say little,
+as a window of flat music can match somewhere by chance, or match poorly where it should, so the
+stretch is judged as a whole, as in version comparison. Score drops alone never fire. After any signal, the old and new period comparison at 5 s
 steps narrows the start and end to within the window size (±30–60 s).
 
 ## Change lifecycle

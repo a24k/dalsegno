@@ -1,6 +1,7 @@
 //! Following the lag over time, and turning it into change signals (D-01, D-04, D-05).
 
 use super::ncc::{Correlator, MIN_REFERENCE_DEVIATION, Match, search};
+use super::same_audio::is_same_audio;
 use super::series::Prepared;
 use rayon::prelude::*;
 use serde::Serialize;
@@ -23,8 +24,11 @@ pub struct TrackConfig {
     pub outlier_points: usize,
     /// A lag run must last this long to count as a shift, in seconds.
     pub min_shift_seconds: f64,
-    /// Consecutive unmatched points that signal new content (D-04).
+    /// Points in a stretch before it can signal new content (D-04).
     pub min_unmatched_points: usize,
+    /// A lag held for this many points can vouch for the audio around it. This must outlast
+    /// repeated material, which matches its other occurrences for as long as it plays.
+    pub min_lasting_points: usize,
     /// Seconds without a stable run that count as lost track (D-01).
     pub lost_track_seconds: f64,
 }
@@ -39,6 +43,7 @@ impl Default for TrackConfig {
             outlier_points: 3,
             min_shift_seconds: 600.0,
             min_unmatched_points: 4,
+            min_lasting_points: 10,
             lost_track_seconds: 1800.0,
         }
     }
@@ -209,7 +214,12 @@ fn mark_outliers(runs: &[LagRun], config: &TrackConfig) -> Vec<LagRun> {
 }
 
 /// Turns runs into signals. A score drop alone never fires (FR-N4).
-pub fn detect_signals(runs: &[LagRun], period: f64, config: &TrackConfig) -> Vec<Signal> {
+pub fn detect_signals(
+    data: &Prepared,
+    runs: &[LagRun],
+    period: f64,
+    config: &TrackConfig,
+) -> Vec<Signal> {
     let mut signals = Vec::new();
     let mut stable_until: Option<f64> = runs.first().map(|run| run.start);
     for run in runs {
@@ -238,12 +248,6 @@ pub fn detect_signals(runs: &[LagRun], period: f64, config: &TrackConfig) -> Vec
                 let skipped = run.end - run.start + config.step;
                 stable_until = stable_until.map(|since| since + skipped);
             }
-            (RunKind::Unmatched, _) if run.points >= config.min_unmatched_points => {
-                signals.push(Signal::Unmatched {
-                    start: run.start,
-                    end: run.end,
-                });
-            }
             _ => {}
         }
     }
@@ -255,7 +259,93 @@ pub fn detect_signals(runs: &[LagRun], period: f64, config: &TrackConfig) -> Vec
             end: last.end,
         });
     }
+    signals.extend(unmatched_signals(data, runs, config));
     signals
+}
+
+/// Finds content that differs from the cycle before.
+///
+/// A window of flat music often matches somewhere by chance, and matches poorly where it should,
+/// so single points say little. Instead, everything after a lasting lag is judged as a whole at
+/// that lag, up to where the same lag lasts again.
+fn unmatched_signals(data: &Prepared, runs: &[LagRun], config: &TrackConfig) -> Vec<Signal> {
+    let lasting =
+        |run: &LagRun| run.kind == RunKind::Lag && run.points >= config.min_lasting_points;
+    let same_lag = |a: &LagRun, b: &LagRun| {
+        a.lag
+            .zip(b.lag)
+            .is_some_and(|(x, y)| (x - y).abs() <= config.lag_tolerance)
+    };
+    let mut signals = Vec::new();
+    let first = runs.iter().position(lasting).unwrap_or(runs.len());
+    signals.extend(raw_signals(&runs[..first], config));
+    let mut at = first;
+    while at < runs.len() {
+        let anchor = runs[at];
+        let again = (at + 1..runs.len()).find(|index| {
+            let run = &runs[*index];
+            lasting(run) && same_lag(run, &anchor)
+        });
+        let next = (at + 1..runs.len()).find(|index| lasting(&runs[*index]));
+        match (again, next) {
+            (Some(end), _) => {
+                signals.extend(judged_signals(data, &runs[at + 1..end], &anchor, config));
+                at = end;
+            }
+            // The lag moved on, so the audio before the new lag was never in the old cycle.
+            (None, Some(end)) => {
+                signals.extend(raw_signals(&runs[at + 1..end], config));
+                at = end;
+            }
+            (None, None) => {
+                signals.extend(judged_signals(data, &runs[at + 1..], &anchor, config));
+                at = runs.len();
+            }
+        }
+    }
+    signals
+}
+
+/// Judges each part of `runs` between stretches of no data, at the lag of `anchor`.
+fn judged_signals(
+    data: &Prepared,
+    runs: &[LagRun],
+    anchor: &LagRun,
+    config: &TrackConfig,
+) -> Vec<Signal> {
+    let Some(lag) = anchor.lag else {
+        return Vec::new();
+    };
+    runs.split(|run| run.kind == RunKind::NoData)
+        .flat_map(|part| {
+            let (Some(first), Some(last)) = (part.first(), part.last()) else {
+                return Vec::new();
+            };
+            if part.iter().map(|run| run.points).sum::<usize>() < config.min_unmatched_points {
+                return Vec::new();
+            }
+            let seconds = last.end - first.start + config.window;
+            match is_same_audio(data, first.start, data, first.start - lag, seconds) {
+                Some(true) => Vec::new(),
+                Some(false) => vec![Signal::Unmatched {
+                    start: first.start,
+                    end: last.end,
+                }],
+                None => raw_signals(part, config),
+            }
+        })
+        .collect()
+}
+
+/// Signals every long unmatched run, for audio with no lag to judge it by.
+fn raw_signals(runs: &[LagRun], config: &TrackConfig) -> Vec<Signal> {
+    runs.iter()
+        .filter(|run| run.kind == RunKind::Unmatched && run.points >= config.min_unmatched_points)
+        .map(|run| Signal::Unmatched {
+            start: run.start,
+            end: run.end,
+        })
+        .collect()
 }
 
 /// Where a change begins and ends, within the window size.
@@ -346,11 +436,15 @@ mod tests {
             .collect()
     }
 
+    fn empty() -> Prepared {
+        prepared(&[])
+    }
+
     fn signals_of(data: &Prepared, from: f64) -> (Vec<LagRun>, Vec<Signal>) {
         let config = config();
         let tracked = track(data, P, from..data.end_time() - 60.0, &config, false);
         let runs = summarise(&tracked, &config);
-        let signals = detect_signals(&runs, P, &config);
+        let signals = detect_signals(data, &runs, P, &config);
         (runs, signals)
     }
 
@@ -431,6 +525,53 @@ mod tests {
     }
 
     #[test]
+    fn flat_music_that_matches_poorly_is_not_new() {
+        let flat: Vec<f32> = (0..3_000)
+            .map(|index| 9.0 + ((index * 7919) % 13) as f32 * 0.01)
+            .collect();
+        let cycle = [&content(20, 1200.0)[..], &flat, &content(21, 1500.0)].concat();
+        let shifted: Vec<f32> = flat.iter().rev().copied().collect();
+        let later = [&cycle[..12_000], &shifted, &cycle[15_000..]].concat();
+        let data = prepared(&[&cycle[..], &later[..]].concat());
+
+        let (runs, signals) = signals_of(&data, P + 10.0);
+
+        assert_eq!(signals, [], "{runs:?}");
+    }
+
+    #[test]
+    fn a_replacement_that_matches_elsewhere_is_caught() {
+        let cycle = content(22, P);
+        let later = [&cycle[..6_000], &cycle[20_000..22_110], &cycle[8_110..]].concat();
+        let data = prepared(&[&cycle[..], &later[..]].concat());
+
+        let (_, signals) = signals_of(&data, P + 10.0);
+
+        assert!(
+            signals
+                .iter()
+                .any(|signal| matches!(signal, Signal::Unmatched { .. })),
+            "{signals:?}"
+        );
+    }
+
+    #[test]
+    fn a_replacement_still_playing_at_the_end_is_caught() {
+        let cycle = content(23, P);
+        let later = [&cycle[..12_000], &content(24, 300.0)[..]].concat();
+        let data = prepared(&[&cycle[..], &later[..]].concat());
+
+        let (_, signals) = signals_of(&data, P + 10.0);
+
+        assert!(
+            signals
+                .iter()
+                .any(|signal| matches!(signal, Signal::Unmatched { .. })),
+            "{signals:?}"
+        );
+    }
+
+    #[test]
     fn a_recording_gap_raises_nothing_a_cycle_later() {
         let cycle = content(7, P);
         let mut series = Series::complete(0.0, 10.0, cycle.repeat(3));
@@ -452,7 +593,7 @@ mod tests {
 
         assert_eq!(runs[1].kind, RunKind::Outlier);
         assert_eq!(
-            shifts(&detect_signals(&runs, P, &config)),
+            shifts(&detect_signals(&empty(), &runs, P, &config)),
             Vec::<f64>::new()
         );
     }
@@ -477,7 +618,7 @@ mod tests {
 
         let runs = summarise(&points(&found), &config);
 
-        assert_eq!(detect_signals(&runs, P, &config), []);
+        assert_eq!(detect_signals(&empty(), &runs, P, &config), []);
     }
 
     #[test]
@@ -495,7 +636,7 @@ mod tests {
 
         let runs = summarise(&points(&found), &config);
 
-        assert_eq!(detect_signals(&runs, P, &config), []);
+        assert_eq!(detect_signals(&empty(), &runs, P, &config), []);
     }
 
     #[test]
@@ -507,7 +648,7 @@ mod tests {
 
         let runs = summarise(&points(&found), &config);
 
-        assert_eq!(detect_signals(&runs, P, &config), []);
+        assert_eq!(detect_signals(&empty(), &runs, P, &config), []);
     }
 
     #[test]
@@ -518,7 +659,7 @@ mod tests {
         let config = config();
 
         let runs = summarise(&points(&found), &config);
-        let signals = detect_signals(&runs, P, &config);
+        let signals = detect_signals(&empty(), &runs, P, &config);
 
         assert!(
             signals
@@ -535,9 +676,14 @@ mod tests {
         let config = config();
 
         let runs = summarise(&points(&found), &config);
-        let signals = detect_signals(&runs, P, &config);
+        let signals = detect_signals(&empty(), &runs, P, &config);
 
-        assert!(matches!(signals.last(), Some(Signal::LostTrack { .. })));
+        assert!(
+            signals
+                .iter()
+                .any(|signal| matches!(signal, Signal::LostTrack { .. })),
+            "{signals:?}"
+        );
     }
 
     #[test]

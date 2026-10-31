@@ -5,8 +5,11 @@
 use super::ncc::{Correlator, MIN_REFERENCE_DEVIATION};
 use super::period::clusters;
 use super::series::Prepared;
+use edges::{EdgeComparison, refine_edges};
 use rayon::prelude::*;
 use serde::Serialize;
+
+mod edges;
 
 /// Comparison parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -19,12 +22,6 @@ pub struct DiffConfig {
     pub threshold: f32,
     /// Shifts within this many seconds belong to one region.
     pub shift_tolerance: f64,
-    /// Correlation at a known shift that bridges a stretch between equal shifts. This is one
-    /// comparison and not a search over a cycle, so far weaker evidence is enough.
-    pub bridge_correlation: f64,
-    /// Mean absolute difference at a known shift above which audio is not the same. Flat, loud
-    /// music correlates poorly with itself, but its level stays close.
-    pub bridge_difference: f64,
     /// A shift held for fewer windows is a brief flip. This must outlast repeated material,
     /// which matches its other occurrences for as long as it plays.
     pub min_windows: usize,
@@ -49,8 +46,6 @@ impl Default for DiffConfig {
             step: 30.0,
             threshold: 0.7,
             shift_tolerance: 3.0,
-            bridge_correlation: 0.3,
-            bridge_difference: 0.35,
             min_windows: 10,
             check_tolerance: 5.0,
             min_deleted_seconds: 60.0,
@@ -394,8 +389,6 @@ fn same_span(a: Window, b: Window, versions: &[VersionCycle<'_>], config: &DiffC
     }
 }
 
-const BRIDGE_NUDGES: [f64; 5] = [0.0, -0.1, 0.1, -0.2, 0.2];
-
 /// Decides whether a stretch between two equal shifts is the same audio.
 struct Bridge<'a> {
     current: &'a Prepared,
@@ -409,22 +402,14 @@ impl Bridge<'_> {
         let config = self.config;
         let time = self.start + span.first as f64 * config.step;
         let seconds = (span.last - span.first) as f64 * config.step + config.window;
-        // Bins of two versions sit up to a bin apart, which inflates the difference wherever
-        // the level moves fast, so the nearest offsets are tried too.
-        BRIDGE_NUDGES.iter().any(|nudge| {
-            let comparison = EdgeComparison {
-                current: self.current,
-                earlier: self.versions[shift.version].data,
-                period: self.versions[shift.version].period,
-                offset: shift.offset + nudge,
-                config,
-            };
-            comparison
-                .compare_at(time, seconds)
-                .is_some_and(|(score, difference)| {
-                    score >= config.bridge_correlation && difference <= config.bridge_difference
-                })
-        })
+        let comparison = EdgeComparison {
+            current: self.current,
+            earlier: self.versions[shift.version].data,
+            period: self.versions[shift.version].period,
+            offset: shift.offset,
+            config,
+        };
+        comparison.is_same(time, seconds)
     }
 }
 
@@ -529,154 +514,6 @@ fn classify(
         Window::NoData => plain(RegionClass::NoData),
         Window::NoMatch if overlaps_known(start, end, known) => plain(RegionClass::Known),
         Window::NoMatch => plain(RegionClass::New),
-    }
-}
-
-/// Moves the edges of matched regions from window precision to about a second.
-///
-/// A window straddling an edge matches nothing, so raw regions stop short of the truth.
-fn refine_edges(
-    regions: &[Region],
-    spans: &[Span],
-    current: &Prepared,
-    versions: &[VersionCycle<'_>],
-    config: &DiffConfig,
-) -> Vec<Region> {
-    let moved: Vec<Region> = regions
-        .iter()
-        .zip(spans)
-        .map(|(region, span)| match span.window {
-            Window::Found(found) => {
-                let comparison = EdgeComparison {
-                    current,
-                    earlier: versions[found.version].data,
-                    period: versions[found.version].period,
-                    offset: found.offset,
-                    config,
-                };
-                Region {
-                    start: comparison.move_start(region.start),
-                    end: comparison.move_end(region.end),
-                    ..*region
-                }
-            }
-            Window::NoData | Window::NoMatch => *region,
-        })
-        .collect();
-    settle(&moved, config)
-}
-
-/// Makes neighbouring regions meet, and drops the slivers left between matched regions.
-fn settle(regions: &[Region], config: &DiffConfig) -> Vec<Region> {
-    let is_matched = |region: &Region| region.shift.is_some();
-    let mut settled: Vec<Region> = Vec::new();
-    for (index, region) in regions.iter().enumerate() {
-        let next = regions.get(index + 1);
-        let previous = index.checked_sub(1).map(|at| regions[at]);
-        if !is_matched(region) {
-            let start = previous.map_or(region.start, |neighbour| neighbour.end);
-            let end = next.map_or(region.end, |neighbour| neighbour.start);
-            let is_sliver = end - start < config.min_region_seconds;
-            if !is_sliver || previous.is_none() || next.is_none() {
-                settled.push(Region {
-                    start,
-                    end: end.max(start),
-                    ..*region
-                });
-            }
-            continue;
-        }
-        let mut current = *region;
-        if let Some(last) = settled.last_mut()
-            && is_matched(last)
-        {
-            let meeting = (last.end + current.start) / 2.0;
-            last.end = meeting;
-            current.start = meeting;
-        }
-        settled.push(current);
-    }
-    settled
-}
-
-struct EdgeComparison<'a> {
-    current: &'a Prepared,
-    earlier: &'a Prepared,
-    period: f64,
-    offset: f64,
-    config: &'a DiffConfig,
-}
-
-impl EdgeComparison<'_> {
-    fn move_end(&self, end: f64) -> f64 {
-        const STEP: f64 = 1.0;
-        let window = self.config.edge_window;
-        let limit = end + self.config.window;
-        // A match can run past the true edge, so the walk starts well inside the region.
-        let mut time = end - self.config.window - window;
-        if !self.agrees_at(time) {
-            return end;
-        }
-        while time + window + STEP <= limit && self.agrees_at(time + STEP) {
-            time += STEP;
-        }
-        time + window
-    }
-
-    fn move_start(&self, start: f64) -> f64 {
-        const STEP: f64 = 1.0;
-        let limit = start - self.config.window;
-        let mut time = start + self.config.window;
-        if !self.agrees_at(time) {
-            return start;
-        }
-        while time - STEP >= limit && self.agrees_at(time - STEP) {
-            time -= STEP;
-        }
-        time
-    }
-
-    /// Silence says nothing, so it lets the edge pass, up to the limit.
-    fn agrees_at(&self, time: f64) -> bool {
-        self.compare_at(time, self.config.edge_window)
-            .is_some_and(|(score, _)| score >= self.config.edge_threshold)
-    }
-
-    /// Returns where `time` falls in the earlier series. It loops, so a position past the
-    /// stored audio is found one period back.
-    fn earlier_time(&self, time: f64, seconds: f64) -> f64 {
-        let position = time - self.offset;
-        let overrun = position + seconds - self.earlier.end_time();
-        if overrun > 0.0 {
-            position - (overrun / self.period).ceil() * self.period
-        } else {
-            position
-        }
-    }
-
-    /// Returns the correlation and mean absolute difference of `seconds` of audio at the
-    /// offset. Windows too flat to correlate score 1, as they are no evidence against.
-    fn compare_at(&self, time: f64, seconds: f64) -> Option<(f64, f64)> {
-        let length = self.current.samples(seconds);
-        let a = self.current.index_of(time)?;
-        let b = self.earlier.index_of(self.earlier_time(time, seconds))?;
-        if a + length > self.current.len() || b + length > self.earlier.len() {
-            return None;
-        }
-        let (mean_a, deviation_a) = self.current.stats(a, length);
-        let (mean_b, deviation_b) = self.earlier.stats(b, length);
-        let pairs = self.current.filled[a..a + length]
-            .iter()
-            .zip(&self.earlier.filled[b..b + length]);
-        let difference = pairs.clone().map(|(x, y)| (x - y).abs()).sum::<f64>() / length as f64;
-        if deviation_a < MIN_REFERENCE_DEVIATION || deviation_b < MIN_REFERENCE_DEVIATION {
-            return Some((1.0, difference));
-        }
-        let product: f64 = pairs.map(|(x, y)| (x - mean_a) * (y - mean_b)).sum();
-        Some((
-            product / (length as f64 * deviation_a * deviation_b),
-            difference,
-        ))
     }
 }
 

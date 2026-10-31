@@ -68,6 +68,23 @@ The low scores were not quiet scenes, as first assumed. These stretches are loud
 level about 9 and deviation under 0.3 against a median of 0.5. Correlation normalises by that
 deviation, so it collapses, while the level stays close.
 
+Tracking had the same weakness, and its synthetic test passed too: points that matched by chance
+broke up the run of unmatched points. Everything after a lasting lag is now judged as a whole at
+that lag, up to where the same lag lasts again.
+
+| Length | Found by `scan` | Unmatched runs used before |
+| --- | --- | --- |
+| 120 s | 43 of 48 | not measured |
+| 211 s | 47 of 47 | 9 of 47 |
+| 400 s | 45 of 45 | 19 of 45 |
+
+No signal appeared away from a replacement, and each signal's ends sit within 180 s of a
+replacement's ends. Neighbouring trials can join into one signal, because they sit only 700 s
+apart.
+
+Tracking an unchanged cycle signals nothing on the 10/31 version, nor on the 10/24 and initial
+versions, which played no part in the tuning. The initial version has only a Python envelope.
+
 Consecutive cycles of one version, which played no part in the tuning, test for false alarms.
 The 10/31 version gives one existing region and nothing new. Before this work a false new region
 and a false deletion sat in the 10/31 comparison, around the repeated material after addition B.
@@ -75,10 +92,6 @@ The 10/24 version found the 10/26 insertion unprompted, when a cut was placed af
 
 ## Not covered
 
-- **`scan` misses most net-zero replacements on real audio.** On the same trials it found 9 of
-  47 at 211 s and 19 of 45 at 400 s. Its synthetic test passes, as the width limit's did. Points
-  that match by chance break the run of unmatched points. Lag shifts are not affected, but
-  change detection in milestone 5 needs this fixed.
 
 - All of this comes from one stream. The thresholds may not suit another, and milestone 7's
   harness is what replaces them.

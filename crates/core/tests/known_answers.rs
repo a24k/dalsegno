@@ -113,7 +113,7 @@ fn the_10_26_insertion_is_detected_with_its_size() {
         false,
     );
     let runs = summarise(&points, &config);
-    let signals = detect_signals(&runs, VERSION_1024_PERIOD, &config);
+    let signals = detect_signals(&data, &runs, VERSION_1024_PERIOD, &config);
 
     println!("{signals:#?}");
     let shift = signals
@@ -304,6 +304,31 @@ fn net_zero_replacements_on_real_audio() {
     }
 }
 
+/// (seconds, share found at least) for the same trials through tracking.
+const TRACKING_DETECTION: [(f64, f64); 3] = [(120.0, 0.85), (211.0, 0.95), (400.0, 0.95)];
+/// How far a signal's ends may sit from a replacement's, for the windows straddling an edge.
+const SIGNAL_MARGIN: f64 = 180.0;
+
+fn unmatched_in_last_cycle(data: &Prepared, period: f64, end: f64) -> Vec<(f64, f64)> {
+    let config = TrackConfig::default();
+    let points = track(
+        data,
+        period,
+        end - period..end - config.window,
+        &config,
+        false,
+    );
+    let runs = summarise(&points, &config);
+    detect_signals(data, &runs, period, &config)
+        .iter()
+        .filter_map(|signal| match signal {
+            Signal::Unmatched { start, end } => Some((*start, *end)),
+            Signal::LagShift { start, end, .. } => Some((*start, *end)),
+            Signal::LostTrack { .. } => None,
+        })
+        .collect()
+}
+
 #[test]
 fn tracking_of_net_zero_replacements_on_real_audio() {
     require_fixtures!();
@@ -311,7 +336,7 @@ fn tracking_of_net_zero_replacements_on_real_audio() {
         return;
     };
     let index = |time: f64| ((time - LATEST_START) * RATE) as usize;
-    for seconds in [120.0, 211.0, 400.0] {
+    for (seconds, wanted) in TRACKING_DETECTION {
         let mut edited = newer.clone();
         let mut planted = Vec::new();
         for (first, last) in EXISTING_STRETCHES {
@@ -326,27 +351,77 @@ fn tracking_of_net_zero_replacements_on_real_audio() {
             }
         }
         let data = prepare(LATEST_START, &edited);
-        let config = TrackConfig::default();
-        let points = track(
-            &data,
-            VERSION_1031_PERIOD,
-            data.end_time() - VERSION_1031_PERIOD..data.end_time() - config.window,
-            &config,
-            false,
-        );
-        let runs = summarise(&points, &config);
-        let signals = detect_signals(&runs, VERSION_1031_PERIOD, &config);
+        let signals = unmatched_in_last_cycle(&data, VERSION_1031_PERIOD, data.end_time());
+        let touches = |signal: &(f64, f64), plant: &(f64, f64)| {
+            signal.0 < plant.1 && signal.1 + 60.0 > plant.0
+        };
         let found = planted
             .iter()
-            .filter(|plant| {
-                signals.iter().any(|signal| match signal {
-                    Signal::Unmatched { start, end } => *start < plant.1 && *end > plant.0,
-                    _ => false,
-                })
+            .filter(|plant| signals.iter().any(|signal| touches(signal, plant)))
+            .count();
+        let stray = signals
+            .iter()
+            .filter(|signal| !planted.iter().any(|plant| touches(signal, plant)))
+            .count();
+        // Neighbouring trials can join into one signal, so each end is checked on its own.
+        let loose = signals
+            .iter()
+            .filter(|signal| {
+                let starts = planted
+                    .iter()
+                    .any(|plant| (signal.0 - plant.0).abs() <= SIGNAL_MARGIN);
+                let ends = planted
+                    .iter()
+                    .any(|plant| (signal.1 - plant.1).abs() <= SIGNAL_MARGIN);
+                !(starts && ends)
             })
             .count();
-        println!("tracking {seconds:.0} s: found {found}/{}", planted.len());
+        println!(
+            "tracking {seconds:.0} s: found {found}/{} stray {stray} signals {} loose {loose}",
+            planted.len(),
+            signals.len()
+        );
+        assert!(found as f64 >= wanted * planted.len() as f64, "{found}");
+        assert_eq!((stray, loose), (0, 0));
     }
+}
+
+#[test]
+fn tracking_an_unchanged_cycle_signals_nothing() {
+    require_fixtures!();
+    let values = envelope("env-1031.npy").expect("env-1031.npy");
+    let data = prepare(LATEST_START, &values);
+
+    let found = unmatched_in_last_cycle(&data, VERSION_1031_PERIOD, data.end_time());
+
+    assert_eq!(found, []);
+}
+
+// This version played no part in choosing the thresholds, so it tests them.
+#[test]
+fn tracking_an_unchanged_cycle_of_the_10_24_version_signals_nothing() {
+    require_fixtures!();
+    let values = envelope("env-recent.npy").expect("env-recent.npy");
+    let data = prepare(RECENT_START, &values);
+    let end = RECENT_START + HOURS_BEFORE_INSERTION * HOUR;
+
+    let found = unmatched_in_last_cycle(&data, 37_648.7, end);
+
+    assert_eq!(found, []);
+}
+
+// The initial version is held out too, but only the Python envelope reaches it.
+#[test]
+fn tracking_an_unchanged_cycle_of_the_initial_version_signals_nothing() {
+    require_fixtures!();
+    let Some(values) = envelope("env.npy") else {
+        return;
+    };
+    let data = prepare(0.0, &values[..(48.0 * HOUR * RATE) as usize]);
+
+    let found = unmatched_in_last_cycle(&data, 38_910.0, data.end_time());
+
+    assert_eq!(found, []);
 }
 
 /// Compares the cycle ending at `end` with the one before it, in one envelope.

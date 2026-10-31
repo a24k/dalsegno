@@ -133,7 +133,7 @@ pub fn scan(path: &Path, period: f64, from: Option<f64>) -> Result<ScanReport, A
     let start = from.unwrap_or(period);
     let points = track(&data, period, start..data.end_time(), &config, false);
     let runs = summarise(&points, &config);
-    let signals = detect_signals(&runs, period, &config);
+    let signals = detect_signals(&data, &runs, period, &config);
     Ok(ScanReport { runs, signals })
 }
 
