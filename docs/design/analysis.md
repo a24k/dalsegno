@@ -127,7 +127,8 @@ Baseline, from measured-facts section 4.5:
    Silence or a gap between equal shifts is bridged. Any other gap between two lasting regions
    of one shift is judged as a whole at that shift, within 0.2 s because bins of two versions
    differ in phase: correlation of at least 0.3 and mean absolute difference of at most 0.35
-   mean the same audio. This is one comparison, so it can be far weaker than a search over a
+   mean the same audio, provided no 120-second piece differs by more than 0.7, which keeps a
+   short replacement from hiding in a long gap. This is one comparison, so it can be far weaker than a search over a
    cycle, and flat, loud music needs it, as its correlation collapses while its level stays
    close. Otherwise the gap is a replacement, which keeps the shift. Replacements of 90 s and
    longer are mostly found, as [the verification](../reference/m3-verification.md#replacements)

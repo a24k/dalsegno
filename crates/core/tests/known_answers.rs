@@ -214,14 +214,12 @@ const TRIAL_SPACING: f64 = 700.0;
 /// Addition B, which is audio the previous version does not have.
 const NEW_AUDIO: (f64, f64) = (12_790_100.0, 12_793_500.0);
 const SOURCE_STEP: f64 = 137.0;
-/// Audio from elsewhere in the cycle, which the previous version does have.
-const SOURCE_DISTANCE: f64 = 15_000.0;
 
 /// Overwrites stretches of real audio with other real audio of the same length, which makes
 /// net-zero replacements with a known answer. Returns (found, trials, false regions).
-fn replacement_trial(seconds: f64, with_new_audio: bool) -> Option<(usize, usize, usize)> {
-    let older = envelope("env-recent.npy")?;
-    let newer = envelope("env-1031.npy")?;
+fn replacement_trial(seconds: f64) -> (usize, usize, usize) {
+    let older = envelope("env-recent.npy").expect("env-recent.npy");
+    let newer = envelope("env-1031.npy").expect("env-1031.npy");
     let previous = prepare(RECENT_START, &older);
     let index = |time: f64| ((time - LATEST_START) * RATE) as usize;
     let mut edited = newer.clone();
@@ -231,11 +229,7 @@ fn replacement_trial(seconds: f64, with_new_audio: bool) -> Option<(usize, usize
         while time + seconds < last {
             let (at, length) = (index(time), (seconds * RATE) as usize);
             let span = NEW_AUDIO.1 - NEW_AUDIO.0 - seconds;
-            let source = if with_new_audio {
-                index(NEW_AUDIO.0 + (planted.len() as f64 * SOURCE_STEP) % span)
-            } else {
-                at - (SOURCE_DISTANCE * RATE) as usize
-            };
+            let source = index(NEW_AUDIO.0 + (planted.len() as f64 * SOURCE_STEP) % span);
             edited[at..at + length].copy_from_slice(&newer[source..source + length]);
             planted.push((time, time + seconds));
             time += TRIAL_SPACING;
@@ -283,21 +277,25 @@ fn replacement_trial(seconds: f64, with_new_audio: bool) -> Option<(usize, usize
         .iter()
         .filter(|region| !planted.iter().any(|plant| overlap(region, plant) > 0.0))
         .count();
-    Some((found, planted.len(), stray))
+    (found, planted.len(), stray)
 }
 
 /// (seconds, share found at least) for a replacement with audio the previous version lacks.
 /// Below 90 s a replacement increasingly disappears into its surroundings.
-const NEW_AUDIO_DETECTION: [(f64, f64); 4] =
-    [(90.0, 0.85), (120.0, 0.9), (150.0, 0.95), (211.0, 0.95)];
+const NEW_AUDIO_DETECTION: [(f64, f64); 6] = [
+    (45.0, 0.0),
+    (60.0, 0.0),
+    (90.0, 0.85),
+    (120.0, 0.9),
+    (150.0, 0.95),
+    (211.0, 0.95),
+];
 
 #[test]
 fn net_zero_replacements_on_real_audio() {
     require_fixtures!();
     for (seconds, wanted) in NEW_AUDIO_DETECTION {
-        let Some((found, trials, stray)) = replacement_trial(seconds, true) else {
-            return;
-        };
+        let (found, trials, stray) = replacement_trial(seconds);
         println!("{seconds:.0} s: found {found}/{trials}, stray {stray}");
         assert!(found as f64 >= wanted * trials as f64, "{found}/{trials}");
         assert_eq!(stray, 0);
@@ -306,10 +304,15 @@ fn net_zero_replacements_on_real_audio() {
 
 /// (seconds, share found at least) for the same trials through tracking.
 const TRACKING_DETECTION: [(f64, f64); 3] = [(120.0, 0.85), (211.0, 0.95), (400.0, 0.95)];
-/// How far a signal's ends may sit from a replacement's, for the windows straddling an edge.
-const SIGNAL_MARGIN: f64 = 180.0;
+/// A signal runs about a window past each edge, which is half of a 120-second replacement.
+const MAX_OUTSIDE_SHARE: f64 = 0.6;
 
-fn unmatched_in_last_cycle(data: &Prepared, period: f64, end: f64) -> Vec<(f64, f64)> {
+fn config_window() -> f64 {
+    TrackConfig::default().window
+}
+
+/// Returns the signals of the last cycle, as (unmatched stretches, anything else).
+fn signals_in_last_cycle(data: &Prepared, period: f64, end: f64) -> (Vec<(f64, f64)>, usize) {
     let config = TrackConfig::default();
     let points = track(
         data,
@@ -319,22 +322,22 @@ fn unmatched_in_last_cycle(data: &Prepared, period: f64, end: f64) -> Vec<(f64, 
         false,
     );
     let runs = summarise(&points, &config);
-    detect_signals(data, &runs, period, &config)
+    let signals = detect_signals(data, &runs, period, &config);
+    let unmatched: Vec<(f64, f64)> = signals
         .iter()
         .filter_map(|signal| match signal {
             Signal::Unmatched { start, end } => Some((*start, *end)),
-            Signal::LagShift { start, end, .. } => Some((*start, *end)),
-            Signal::LostTrack { .. } => None,
+            _ => None,
         })
-        .collect()
+        .collect();
+    let others = signals.len() - unmatched.len();
+    (unmatched, others)
 }
 
 #[test]
 fn tracking_of_net_zero_replacements_on_real_audio() {
     require_fixtures!();
-    let Some(newer) = envelope("env-1031.npy") else {
-        return;
-    };
+    let newer = envelope("env-1031.npy").expect("env-1031.npy");
     let index = |time: f64| ((time - LATEST_START) * RATE) as usize;
     for (seconds, wanted) in TRACKING_DETECTION {
         let mut edited = newer.clone();
@@ -351,38 +354,40 @@ fn tracking_of_net_zero_replacements_on_real_audio() {
             }
         }
         let data = prepare(LATEST_START, &edited);
-        let signals = unmatched_in_last_cycle(&data, VERSION_1031_PERIOD, data.end_time());
-        let touches = |signal: &(f64, f64), plant: &(f64, f64)| {
-            signal.0 < plant.1 && signal.1 + 60.0 > plant.0
+        let (signals, others) = signals_in_last_cycle(&data, VERSION_1031_PERIOD, data.end_time());
+        // Points are window starts, so a signal covers up to a window past its last point.
+        let overlap = |signal: &(f64, f64), plant: &(f64, f64)| {
+            (signal.1 + config_window()).min(plant.1) - signal.0.max(plant.0)
         };
         let found = planted
             .iter()
-            .filter(|plant| signals.iter().any(|signal| touches(signal, plant)))
+            .filter(|plant| {
+                signals
+                    .iter()
+                    .any(|signal| overlap(signal, plant) >= seconds / 2.0)
+            })
             .count();
         let stray = signals
             .iter()
-            .filter(|signal| !planted.iter().any(|plant| touches(signal, plant)))
+            .filter(|signal| !planted.iter().any(|plant| overlap(signal, plant) > 0.0))
             .count();
-        // Neighbouring trials can join into one signal, so each end is checked on its own.
-        let loose = signals
+        // Neighbouring trials can join into one signal, but it must not run on through audio
+        // that lasted: at most this share of the signalled time may lie outside the trials.
+        let signalled: f64 = signals.iter().map(|signal| signal.1 - signal.0).sum();
+        let inside: f64 = signals
             .iter()
-            .filter(|signal| {
-                let starts = planted
-                    .iter()
-                    .any(|plant| (signal.0 - plant.0).abs() <= SIGNAL_MARGIN);
-                let ends = planted
-                    .iter()
-                    .any(|plant| (signal.1 - plant.1).abs() <= SIGNAL_MARGIN);
-                !(starts && ends)
-            })
-            .count();
+            .flat_map(|signal| planted.iter().map(|plant| overlap(signal, plant).max(0.0)))
+            .sum();
+        let outside =
+            1.0 - (inside / (signalled + signals.len() as f64 * config_window())).min(1.0);
         println!(
-            "tracking {seconds:.0} s: found {found}/{} stray {stray} signals {} loose {loose}",
+            "tracking {seconds:.0} s: found {found}/{} stray {stray} signals {} outside {outside:.2}",
             planted.len(),
             signals.len()
         );
         assert!(found as f64 >= wanted * planted.len() as f64, "{found}");
-        assert_eq!((stray, loose), (0, 0));
+        assert_eq!((stray, others), (0, 0));
+        assert!(outside <= MAX_OUTSIDE_SHARE, "{outside}");
     }
 }
 
@@ -392,9 +397,9 @@ fn tracking_an_unchanged_cycle_signals_nothing() {
     let values = envelope("env-1031.npy").expect("env-1031.npy");
     let data = prepare(LATEST_START, &values);
 
-    let found = unmatched_in_last_cycle(&data, VERSION_1031_PERIOD, data.end_time());
+    let found = signals_in_last_cycle(&data, VERSION_1031_PERIOD, data.end_time());
 
-    assert_eq!(found, []);
+    assert_eq!(found, (Vec::new(), 0));
 }
 
 // This version played no part in choosing the thresholds, so it tests them.
@@ -405,9 +410,9 @@ fn tracking_an_unchanged_cycle_of_the_10_24_version_signals_nothing() {
     let data = prepare(RECENT_START, &values);
     let end = RECENT_START + HOURS_BEFORE_INSERTION * HOUR;
 
-    let found = unmatched_in_last_cycle(&data, 37_648.7, end);
+    let found = signals_in_last_cycle(&data, 37_648.7, end);
 
-    assert_eq!(found, []);
+    assert_eq!(found, (Vec::new(), 0));
 }
 
 // The initial version is held out too, but only the Python envelope reaches it.
@@ -419,9 +424,9 @@ fn tracking_an_unchanged_cycle_of_the_initial_version_signals_nothing() {
     };
     let data = prepare(0.0, &values[..(48.0 * HOUR * RATE) as usize]);
 
-    let found = unmatched_in_last_cycle(&data, 38_910.0, data.end_time());
+    let found = signals_in_last_cycle(&data, 38_910.0, data.end_time());
 
-    assert_eq!(found, []);
+    assert_eq!(found, (Vec::new(), 0));
 }
 
 /// Compares the cycle ending at `end` with the one before it, in one envelope.

@@ -53,9 +53,9 @@ the previous version lacks. `compare` was tuned on this and on the 10/31 compari
 
 | Length | Found by `compare` | Width limit used before |
 | --- | --- | --- |
-| 45 s | 30 of 48 | 0 of 48 |
-| 60 s | 35 of 48 | 0 of 48 |
-| 90 s | 43 of 48 | 0 of 48 |
+| 45 s | 33 of 48 | 0 of 48 |
+| 60 s | 40 of 48 | 0 of 48 |
+| 90 s | 45 of 48 | 0 of 48 |
 | 120 s | 46 of 48 | 0 of 48 |
 | 150 s | 47 of 47 | 3 of 47 |
 | 211 s | 46 of 47 | 5 of 47 |
@@ -74,13 +74,14 @@ that lag, up to where the same lag lasts again.
 
 | Length | Found by `scan` | Unmatched runs used before |
 | --- | --- | --- |
-| 120 s | 43 of 48 | not measured |
+| 120 s | 45 of 48 | not measured |
 | 211 s | 47 of 47 | 9 of 47 |
 | 400 s | 45 of 45 | 19 of 45 |
 
-No signal appeared away from a replacement, and each signal's ends sit within 180 s of a
-replacement's ends. Neighbouring trials can join into one signal, because they sit only 700 s
-apart.
+A trial counts as found when a signal covers at least half of it. No signal appeared away from a
+replacement, and tracking raised no other signal. A signal runs about a window past each edge,
+and neighbouring trials can join, as they sit only 700 s apart, so about 0.4 to 0.5 of the
+signalled time lies outside the trials.
 
 Tracking an unchanged cycle signals nothing on the 10/31 version, nor on the 10/24 and initial
 versions, which played no part in the tuning. The initial version has only a Python envelope.

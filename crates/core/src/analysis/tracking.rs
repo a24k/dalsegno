@@ -282,10 +282,14 @@ fn unmatched_signals(data: &Prepared, runs: &[LagRun], config: &TrackConfig) -> 
     let mut at = first;
     while at < runs.len() {
         let anchor = runs[at];
-        let again = (at + 1..runs.len()).find(|index| {
-            let run = &runs[*index];
-            lasting(run) && same_lag(run, &anchor)
-        });
+        // A lag that settles elsewhere is a real change, and repeated material only visits.
+        let settled = |run: &LagRun| run.end - run.start >= config.min_shift_seconds;
+        let again = (at + 1..runs.len())
+            .find(|index| {
+                let run = &runs[*index];
+                lasting(run) && (same_lag(run, &anchor) || settled(run))
+            })
+            .filter(|index| same_lag(&runs[*index], &anchor));
         let next = (at + 1..runs.len()).find(|index| lasting(&runs[*index]));
         match (again, next) {
             (Some(end), _) => {
@@ -324,7 +328,7 @@ fn judged_signals(
             if part.iter().map(|run| run.points).sum::<usize>() < config.min_unmatched_points {
                 return Vec::new();
             }
-            let seconds = last.end - first.start + config.window;
+            let seconds = last.end - first.start + config.step;
             match is_same_audio(data, first.start, data, first.start - lag, seconds) {
                 Some(true) => Vec::new(),
                 Some(false) => vec![Signal::Unmatched {
@@ -565,6 +569,33 @@ mod tests {
 
         assert!(
             signals
+                .iter()
+                .any(|signal| matches!(signal, Signal::Unmatched { .. })),
+            "{signals:?}"
+        );
+    }
+
+    #[test]
+    fn a_lag_that_settles_and_returns_is_not_new_content() {
+        let data = prepared(&content(25, 6000.0));
+        let config = config();
+        let run = |start: f64, points: usize, lag: f64| LagRun {
+            start,
+            end: start + (points - 1) as f64 * config.step,
+            kind: RunKind::Lag,
+            lag: Some(lag),
+            points,
+        };
+        let runs = [
+            run(3200.0, 20, P),
+            run(3800.0, 30, P + 500.0),
+            run(4700.0, 20, P),
+        ];
+
+        let signals = detect_signals(&data, &runs, P, &config);
+
+        assert!(
+            !signals
                 .iter()
                 .any(|signal| matches!(signal, Signal::Unmatched { .. })),
             "{signals:?}"
