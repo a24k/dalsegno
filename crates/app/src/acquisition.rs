@@ -2,11 +2,17 @@
 //!
 //! Text input is validated here, before any external call.
 
+use crate::backfill::{BackfillReport, backfill};
 use crate::doctor::{DoctorReport, run_doctor};
 use crate::error::AcquireError;
 use crate::family::{FamilyController, SharedFamily};
-use crate::fetch::{FetchLimits, FetchRange, FetchReport, Fetcher, RetryPolicy, fetch_range};
+use crate::features::{FeatureReport, extract_features};
+use crate::fetch::{
+    FetchLimits, FetchRange, FetchReport, Fetcher, Ledger, RetryPolicy, SharedDatabase,
+    fetch_range, lock,
+};
 use crate::probe::{ProbeReport, ProbeTools, probe_stream};
+use crate::retention::{SweepReport, sweep};
 use crate::session::{Clock, Session, system_clock};
 pub use dalsegno_core::stream::IpPolicy;
 
@@ -15,10 +21,17 @@ use dalsegno_io::fragments::FragmentStore;
 use dalsegno_io::http::{BindAddresses, FragmentClient};
 use dalsegno_io::tools::{find_program, has_ipv6_route};
 use dalsegno_io::ytdlp::YtDlp;
-use std::path::PathBuf;
-use std::sync::Arc;
+use dalsegno_store::database::Database;
+use dalsegno_store::streams::{NewStream, StreamRow};
+use serde::Serialize;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use tokio::task::spawn_blocking;
 
 const YT_DLP: &str = "yt-dlp";
+const DATABASE_FILE: &str = "dalsegno.sqlite3";
+const MILLIS_PER_SECOND: i64 = 1_000;
 
 /// Settings shared by the acquisition use cases.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +40,53 @@ pub struct AcquisitionOptions {
     pub policy: IpPolicy,
     /// Cookie file for yt-dlp.
     pub cookies: Option<PathBuf>,
+}
+
+/// The database and fragment files under one data directory.
+#[derive(Debug, Clone)]
+pub struct Library {
+    database: SharedDatabase,
+    store: FragmentStore,
+}
+
+impl Library {
+    /// Opens or creates the library.
+    pub fn open(data_dir: &Path) -> Result<Self, AcquireError> {
+        fs::create_dir_all(data_dir)?;
+        let database = Database::open(&data_dir.join(DATABASE_FILE))?;
+        Ok(Self {
+            database: Arc::new(Mutex::new(database)),
+            store: FragmentStore::new(data_dir),
+        })
+    }
+
+    fn registered(&self, input: &str) -> Result<StreamRow, AcquireError> {
+        let video = parse_stream(input)?;
+        lock(&self.database)?
+            .stream_by_video_id(video.as_str())?
+            .ok_or_else(|| AcquireError::NotRegistered(video.to_string()))
+    }
+
+    /// Brings a stream's envelope up to date.
+    pub async fn features(&self, stream: &str) -> Result<FeatureReport, AcquireError> {
+        let row = self.registered(stream)?;
+        let library = self.clone();
+        spawn_blocking(move || {
+            let mut database = lock(&library.database)?;
+            extract_features(&mut database, &library.store, &row)
+        })
+        .await
+        .map_err(|_| AcquireError::Task)?
+    }
+
+    /// Removes what retention allows.
+    pub async fn sweep(&self) -> Result<SweepReport, AcquireError> {
+        let library = self.clone();
+        let now = system_clock()() as i64 * MILLIS_PER_SECOND;
+        spawn_blocking(move || sweep(&mut *lock(&library.database)?, &library.store, now))
+            .await
+            .map_err(|_| AcquireError::Task)?
+    }
 }
 
 /// One range to fetch.
@@ -40,10 +100,17 @@ pub struct FetchRequest {
     pub first: u64,
     /// Last `sq`.
     pub last: u64,
-    /// Data directory.
-    pub data_dir: PathBuf,
     /// Where to join the range, once it is complete.
     pub output: Option<PathBuf>,
+}
+
+/// What registering a stream produced.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AddReport {
+    /// Row ID of the stream.
+    pub stream_id: i64,
+    /// What the probe learned.
+    pub probe: ProbeReport,
 }
 
 /// The acquisition use cases, wired to the real adapters.
@@ -100,40 +167,93 @@ impl Acquisition {
         .await
     }
 
-    /// Fetches a range, and joins it when it is complete and an output is set.
-    pub async fn fetch(&self, request: FetchRequest) -> Result<FetchReport, AcquireError> {
-        let video = parse_stream(&request.stream)?;
-        let store = FragmentStore::new(&request.data_dir);
-        let clock: Clock = system_clock();
-        let session = Session::new(
-            Arc::clone(&self.resolver),
-            video.clone(),
-            request.itag,
-            Arc::clone(&self.family),
-            clock,
-            RetryPolicy::default().base_delay,
-        );
-        let fetcher = Fetcher {
-            session,
-            client: self.client.clone(),
-            store: store.clone(),
-            limits: FetchLimits::default(),
-            retry: RetryPolicy::default(),
+    /// Probes a stream and stores it in the `registered` state (FR-S1, FR-S2).
+    pub async fn add(&self, library: &Library, stream: &str) -> Result<AddReport, AcquireError> {
+        let video = parse_stream(stream)?;
+        let probe = self.probe(stream).await?;
+        let audio = probe.audio.as_ref().ok_or(AcquireError::NoAudio)?;
+        let fragment_len = probe.fragment_seconds.ok_or(AcquireError::NoAudio)?;
+        let row = NewStream {
+            video_id: video.to_string(),
+            title: probe.title.clone(),
+            channel_id: probe.channel_id.clone(),
+            channel_name: probe.channel.clone(),
+            thumbnail_url: probe.thumbnail.clone(),
+            video_itag: probe.video.as_ref().map(|format| format.itag),
+            audio_itag: audio.itag,
+            fragment_len,
+            registered_at: system_clock()() as i64 * MILLIS_PER_SECOND,
         };
+        let stream_id = lock(&library.database)?.insert_stream(&row)?;
+        Ok(AddReport { stream_id, probe })
+    }
+
+    /// Fetches a range, and joins it when it is complete and an output is set.
+    pub async fn fetch(
+        &self,
+        library: &Library,
+        request: FetchRequest,
+    ) -> Result<FetchReport, AcquireError> {
+        let row = library.registered(&request.stream)?;
+        let fetcher = Arc::new(self.fetcher(library, &row, request.itag)?);
         let range = FetchRange {
-            video: video.clone(),
+            stream_id: row.id,
             itag: request.itag,
             first: request.first,
             last: request.last,
         };
         let report = fetch_range(fetcher, range).await?;
         if let Some(output) = request.output.filter(|_| report.is_complete()) {
-            let (itag, first, last) = (request.itag, request.first, request.last);
-            tokio::task::spawn_blocking(move || store.concat(&video, itag, first, last, &output))
+            let store = library.store.clone();
+            let (id, itag, first, last) = (row.id, request.itag, request.first, request.last);
+            spawn_blocking(move || store.concat(id, itag, first, last, &output))
                 .await
                 .map_err(|_| AcquireError::Task)??;
         }
         Ok(report)
+    }
+
+    /// Fills the last `hours` of a stream's audio.
+    pub async fn backfill(
+        &self,
+        library: &Library,
+        stream: &str,
+        hours: f64,
+    ) -> Result<BackfillReport, AcquireError> {
+        let row = library.registered(stream)?;
+        let fetcher = self.fetcher(library, &row, row.stream.audio_itag)?;
+        backfill(Arc::new(fetcher), row.stream.fragment_len, hours).await
+    }
+
+    fn fetcher(
+        &self,
+        library: &Library,
+        row: &StreamRow,
+        itag: u32,
+    ) -> Result<Fetcher<YtDlp>, AcquireError> {
+        let video = parse_stream(&row.stream.video_id)?;
+        let clock: Clock = system_clock();
+        Ok(Fetcher {
+            session: Session::new(
+                Arc::clone(&self.resolver),
+                video,
+                itag,
+                Arc::clone(&self.family),
+                Arc::clone(&clock),
+                RetryPolicy::default().base_delay,
+            ),
+            client: self.client.clone(),
+            store: library.store.clone(),
+            limits: FetchLimits::default(),
+            retry: RetryPolicy::default(),
+            ledger: Ledger {
+                database: Arc::clone(&library.database),
+                stream_id: row.id,
+                itag,
+                fragment_len: row.stream.fragment_len,
+            },
+            clock,
+        })
     }
 }
 
@@ -167,12 +287,13 @@ mod tests {
             itag: 140,
             first: 1,
             last: 1,
-            data_dir: PathBuf::from("/nonexistent"),
             output: None,
         };
+        let data = tempfile::tempdir().unwrap();
+        let library = Library::open(data.path()).unwrap();
 
         assert!(matches!(
-            tool.fetch(request).await,
+            tool.fetch(&library, request).await,
             Err(AcquireError::InvalidRequest(_))
         ));
         assert!(matches!(
@@ -183,6 +304,30 @@ mod tests {
             tool.doctor(Some("--exec=rm")).await,
             Err(AcquireError::InvalidRequest(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn streams_must_be_registered_before_use() {
+        let data = tempfile::tempdir().unwrap();
+        let library = Library::open(data.path()).unwrap();
+
+        assert!(matches!(
+            library.features("abcDEF123_-").await,
+            Err(AcquireError::NotRegistered(_))
+        ));
+        assert!(matches!(
+            acquisition().backfill(&library, "abcDEF123_-", 1.0).await,
+            Err(AcquireError::NotRegistered(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn sweeping_an_empty_library_does_nothing() {
+        let data = tempfile::tempdir().unwrap();
+
+        let report = Library::open(data.path()).unwrap().sweep().await.unwrap();
+
+        assert_eq!(report, SweepReport::default());
     }
 
     #[tokio::test]

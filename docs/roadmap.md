@@ -43,8 +43,8 @@ container reader, format detection, `doctor`.
 Migrations, repositories, fragment store, feature runs, envelope, head samples, gaps,
 retention holds and sweep.
 
-**Exit:** envelope passes the S4 compatibility check against `env.npy`. Incremental equals
-batch.
+**Exit:** envelope passes the S4 compatibility check against the Python envelopes. Incremental
+equals batch, within the noise generator's last bits after a restart.
 
 ## M3 Analysis
 

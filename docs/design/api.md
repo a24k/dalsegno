@@ -60,12 +60,17 @@ dalsegno refine --video <file> --at <s>
 
 Envelope input accepts `.npy` so that existing Python results can be used directly.
 
-Until milestone 5 these commands run in process (D-17). `probe` becomes part of `dalsegno add`:
+Until milestone 5 these commands run in process (D-17). All but `doctor` and `probe` need
+`--data-dir` or `DALSEGNO_DATA`:
 
 ```text
-dalsegno doctor [--stream <id>]
-dalsegno probe  <id>
-dalsegno fetch  <id> --itag <n> --first <sq> --last <sq> --data-dir <dir> [--output <file>]
+dalsegno doctor   [--stream <id>]
+dalsegno probe    <id>
+dalsegno add      <id>
+dalsegno fetch    <id> --itag <n> --first <sq> --last <sq> [--output <file>]
+dalsegno backfill <id> [--hours <n>]
+dalsegno features <id>
+dalsegno sweep
 ```
 
 Use the CLI when a judgement looks suspicious, for example a region classified as new that

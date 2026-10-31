@@ -40,7 +40,7 @@ Fetching any obtainable sq returns the following headers. With these, the corres
 | Header | Meaning |
 | --- | --- |
 | `X-Head-Seqnum` | The current latest sq |
-| `X-Head-Time-Sec` / `X-Head-Time-Millis` | The stream time of the latest fragment |
+| `X-Head-Time-Sec` / `X-Head-Time-Millis` | The stream time of the latest fragment, in seconds and in milliseconds |
 | `X-Walltime-Ms` | The server's **current** wall-clock time (not the time of the fetched fragment) |
 | `X-Sequence-Num` | The sq of the fetched fragment |
 
