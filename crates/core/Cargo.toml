@@ -9,5 +9,8 @@ publish.workspace = true
 [dependencies]
 thiserror.workspace = true
 
+[dev-dependencies]
+dalsegno-test-support = { path = "../test-support" }
+
 [lints]
 workspace = true
