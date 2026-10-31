@@ -58,7 +58,9 @@ reference window, where normalisation divides by nearly zero.
 **Decision.** A reference window with too little variance yields "no data", which
 is distinct from "no match". So does a valid reference whose target at `t − P` falls in
 a recording gap, otherwise every outage raises a false change one cycle later. Tracking
-never treats "no data" as evidence.
+never treats "no data" as evidence. On the reference stream the rule never fired in 48 hours,
+because a 60-second window of real audio is not that flat, so it guards against digital silence
+lasting a minute or more. A replacement by such silence goes mostly unnoticed by tracking.
 
 ### D-06 Keyframe times come from measurements
 
@@ -282,3 +284,15 @@ values, such as the naming suffix, are data and can be in any language.
 **Decision.** `docs/` is the single source of truth, and the Japanese brief is retired.
 Stream-specific values that must stay out of this public repository are kept with the local
 fixtures. References to "the brief" in this file record where a decision came from.
+
+### D-30 Silences between videos locate a change and do not find one
+
+Audio stops between videos, while a quiet scene keeps a noise floor. On the reference stream,
+silences of at least 0.1 s at -100 dB recur at every position one cycle later, about 4 minutes
+apart, and only 15% of quiet stretches at -50 dB hold one.
+
+**Decision.** Finding a change stays with the envelope, as a replacement of equal length leaves
+these silences where they were, and they are absent from flat music. Once a stretch differs, it is
+cut at its silences and judged video by video, in comparison and in tracking, so that a change has
+the edges of the video that changed. They are read from the envelope, so no audio is decoded again.
+Candidates for cutting remain [the export design's](design/export.md) black and silence detection.

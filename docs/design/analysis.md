@@ -125,8 +125,9 @@ Baseline, from measured-facts section 4.5:
    5 minutes is a brief flip, because repeated material matches its other occurrences for as
    long as it plays.
    Silence or a gap between equal shifts is bridged. Any other gap between two lasting regions
-   of one shift is judged as a whole at that shift, within 0.2 s because bins of two versions
-   differ in phase: correlation of at least 0.3 and mean absolute difference of at most 0.35
+   of one shift is judged as a whole at that shift, or at the shift of the region after it, as
+   equal shifts can differ by the shift tolerance. Each is tried within 0.2 s because bins of
+   two versions differ in phase: correlation of at least 0.3 and mean absolute difference of at most 0.35
    mean the same audio, provided no 120-second piece differs by more than 0.7, which keeps a
    short replacement from hiding in a long gap. This is one comparison, so it can be far weaker than a search over a
    cycle, and flat, loud music needs it, as its correlation collapses while its level stays
@@ -136,10 +137,14 @@ Baseline, from measured-facts section 4.5:
 5. Move region edges to about 3 s, by walking outwards from inside the region at a fixed shift
    with a 5-second window. A 60-second window straddling an edge matches nothing, or matches past
    the true edge.
-6. Keep the heaviest chain of existing regions that follows the old order without overlapping.
+6. Split each new region at the silences between videos, where audio stops, and judge each video
+   alone. Between equal shifts a video that is the same audio goes back to existing; between
+   different shifts this runs in from each end, as the change lies between them. When no video
+   stands out the region stays whole. Edges of what stays new then move to a silence within 40 s.
+7. Keep the heaviest chain of existing regions that follows the old order without overlapping.
    The rest are copies, such as repeated material placed in front of an addition, and count
    as inserted. Shift changes are taken along this chain.
-7. Classify:
+8. Classify:
 
 | Class | Rule |
 | --- | --- |
