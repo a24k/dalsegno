@@ -60,6 +60,14 @@ dalsegno refine --video <file> --at <s>
 
 Envelope input accepts `.npy` so that existing Python results can be used directly.
 
+Until milestone 5 these commands run in process (D-17). `probe` becomes part of `dalsegno add`:
+
+```text
+dalsegno doctor [--stream <id>]
+dalsegno probe  <id>
+dalsegno fetch  <id> --itag <n> --first <sq> --last <sq> --data-dir <dir> [--output <file>]
+```
+
 Use the CLI when a judgement looks suspicious, for example a region classified as new that
 may actually be existing, to inspect the internals, or to cut a manually specified range.
 Each Web UI operation calls the same API, so it can be reproduced from the CLI.

@@ -116,13 +116,28 @@ limits are per request rather than per byte.
 
 Registration runs yt-dlp once, stores title, channel ID and thumbnail reference, chooses
 formats (D-15) and fetches two adjacent fragments per candidate format to measure the
-fragment length and to check keyframe-first and concatenation.
+fragment length and to check keyframe-first and concatenation. That one call returns the URL
+of every format, so probing needs no further yt-dlp call.
+
+- **Head:** a request for `sq=1`, long out of the DVR, returns `X-Head-Seqnum` in its headers.
+- **Audio:** the pair must be AAC-LC and contiguous to the tick.
+- **Video:** at most four candidates, best first. ffprobe confirms that both fragments start
+  with a keyframe and that joining them keeps every packet, and ffmpeg must copy the join into
+  an mp4. Using these tools covers WebM and mp4 sources without more parsing code.
+
+## Before the database
+
+Until milestone 2 there is no `fragments` table. `<stream_id>` in the layout is the video ID,
+a rerun skips files that exist, and the family state lasts one process. Temporary files have
+unique names, so a killed process leaves its file until the orphan sweep. A range fetch reports
+fragments that keep failing and carries on, and stops only for a failure that concerns every
+fragment: a stream that is gone, or no family left.
 
 ## Container reader
 
-`core::container` parses a byte buffer and returns `FragmentInfo { start_time, duration,
-packets, codec_config }` (D-21). It rejects malformed input with errors, never panics,
-and has fuzz-style tests on truncated and corrupted buffers.
+`core::container` parses a byte buffer and returns `Mp4Fragment { start_ticks, duration_ticks,
+timescale, packets, audio_config }`, or a start time for WebM (D-21). It rejects malformed input
+with errors, never panics, and has fuzz-style tests on truncated and corrupted buffers.
 
 - **mp4:** `moof`/`traf`/`tfdt`, `trun` sample sizes, `mdat` offsets, `mdhd` timescale and
   the `AudioSpecificConfig`.
