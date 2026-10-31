@@ -32,6 +32,9 @@ pub enum AcquireError {
     /// The stream has not been added yet.
     #[error("stream {0} is not registered, run add first")]
     NotRegistered(String),
+    /// An envelope could not be built or read.
+    #[error("envelope: {0}")]
+    Envelope(String),
     /// The probe found no usable audio.
     #[error("no audio format passed its checks")]
     NoAudio,

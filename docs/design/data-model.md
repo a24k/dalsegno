@@ -160,7 +160,7 @@ CREATE TABLE change_regions (
   id INTEGER PRIMARY KEY,
   change_id INTEGER NOT NULL REFERENCES changes(id),
   class TEXT NOT NULL CHECK (class IN
-    ('existing','new','revival','known','deleted')),
+    ('existing','new','revival','known','deleted','no_data')),
   start_time REAL NOT NULL, end_time REAL NOT NULL,
   match_version_id INTEGER REFERENCES versions(id),
   match_start_time REAL

@@ -89,10 +89,12 @@ Evaluated after each tracking pass:
 | Signal | Condition | Meaning |
 | --- | --- | --- |
 | Lag shift | A run of at least 10 minutes settles at `P + Δ`, `Δ ≠ 0` | Net change of Δ. |
-| Unmatched run | At least 4 consecutive points of `NoMatch`, not `NoData` (D-04) | New content, including a net-zero replacement. |
+| Unmatched run | A stretch of at least 4 points after a lasting lag that is not the same audio at that lag, or at least 4 consecutive `NoMatch` points where no lag applies. `NoData` splits a stretch and never counts (D-04, D-05). | New content, including a net-zero replacement. |
 | Lost track | No stable run for 30 minutes | Widen the search until a run stabilises (D-01), and treat the interval as a transition (D-09). |
 
-Score drops alone never fire. After any signal, the old and new period comparison at 5 s
+A lasting lag holds for 10 points, longer than repeated material plays. Single points say little,
+as a window of flat music can match somewhere by chance, or match poorly where it should, so the
+stretch is judged as a whole, as in version comparison. Score drops alone never fire. After any signal, the old and new period comparison at 5 s
 steps narrows the start and end to within the window size (±30–60 s).
 
 ## Change lifecycle
@@ -119,8 +121,30 @@ Baseline, from measured-facts section 4.5:
 1. Cut the current cycle into 60-second windows at 30-second steps.
 2. Search each in every stored version's cycle, extended 10 minutes either side.
 3. Per window, record best version, position and score.
-4. Convert to `shift = t_new − t_old`, and detect where shift changes, ignoring brief flips.
-5. Classify:
+4. Convert to `shift = t_new − t_old`, and detect where shift changes. A shift held for under
+   5 minutes is a brief flip, because repeated material matches its other occurrences for as
+   long as it plays.
+   Silence or a gap between equal shifts is bridged. Any other gap between two lasting regions
+   of one shift is judged as a whole at that shift, or at the shift of the region after it, as
+   equal shifts can differ by the shift tolerance. Each is tried within 0.2 s because bins of
+   two versions differ in phase: correlation of at least 0.3 and mean absolute difference of at most 0.35
+   mean the same audio, provided no 120-second piece differs by more than 0.7, which keeps a
+   short replacement from hiding in a long gap. This is one comparison, so it can be far weaker than a search over a
+   cycle, and flat, loud music needs it, as its correlation collapses while its level stays
+   close. Otherwise the gap is a replacement, which keeps the shift. Replacements of 90 s and
+   longer are mostly found, as [the verification](../reference/m3-verification.md#replacements)
+   measures.
+5. Move region edges to about 3 s, by walking outwards from inside the region at a fixed shift
+   with a 5-second window. A 60-second window straddling an edge matches nothing, or matches past
+   the true edge.
+6. Split each new region at the silences between videos, where audio stops, and judge each video
+   alone. Between equal shifts a video that is the same audio goes back to existing; between
+   different shifts this runs in from each end, as the change lies between them. When no video
+   stands out the region stays whole. Edges of what stays new then move to a silence within 40 s.
+7. Keep the heaviest chain of existing regions that follows the old order without overlapping.
+   The rest are copies, such as repeated material placed in front of an addition, and count
+   as inserted. Shift changes are taken along this chain.
+8. Classify:
 
 | Class | Rule |
 | --- | --- |
@@ -129,6 +153,7 @@ Baseline, from measured-facts section 4.5:
 | known | Overlaps a registered known clip. |
 | new | No stable match anywhere. |
 | deleted | Region of the previous version with no counterpart. |
+| no data | Silence or a recording gap between different shifts. Never counted as inserted (D-05). |
 
 The window search is rayon-parallel, using one FFT plan per thread.
 
@@ -141,8 +166,13 @@ pub struct SelfCheck { name: String, expected: f64, actual: f64, tolerance: f64,
 - Sum of shift changes equals the period change.
 - Inserted (new, revival and known regions) minus deleted equals the period change.
 
-Tolerance starts at 5 s (the known example is off by 1 s). A failure asks for human
+Tolerance starts at 5 s (the known example is off by 1 s). Lengths depend on region edges, each
+good to about 3 s, so the second check allows at least 3 s per edge. A failure asks for human
 review and never blocks the workflow.
+
+The second check is weaker than it looks. Regions divide each cycle without gaps, so it mostly
+restates the first, and on the known example they agree to the tenth of a second. Treat a pass as
+a sanity check, not as independent evidence.
 
 ## Evaluation (milestone 7)
 

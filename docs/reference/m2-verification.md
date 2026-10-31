@@ -11,8 +11,8 @@ reference stream.
 The comparison puts bin zero at the first sample, as the Python envelope does. The product grid
 is anchored to stream time, so stored bins sit up to 0.1 s from these.
 
-These figures say the pipeline matches the existing one. Whether the envelope is good enough for
-analysis is decided in milestone 3.
+These figures say the pipeline matches the existing one. Milestone 3 then showed the envelope is
+good enough for analysis, by reproducing the known answers from it.
 
 ## Live run
 

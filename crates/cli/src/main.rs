@@ -5,10 +5,12 @@ use clap::{Parser, Subcommand};
 use dalsegno_app::acquisition::{
     Acquisition, AcquisitionOptions, AddReport, FetchRequest, Library,
 };
+use dalsegno_app::analysis::{Diff, PeriodConfig};
 use dalsegno_app::backfill::{BackfillReport, DEFAULT_HOURS};
 use dalsegno_app::doctor::DoctorReport;
 use dalsegno_app::features::FeatureReport;
 use dalsegno_app::fetch::FetchReport;
+use dalsegno_app::offline::{self, DiffRequest, PeriodReport, ScanReport};
 use dalsegno_app::probe::ProbeReport;
 use dalsegno_app::retention::SweepReport;
 use serde::Serialize;
@@ -90,6 +92,63 @@ enum Command {
     },
     /// Remove fragments past retention and repair differences between files and rows.
     Sweep,
+    /// Build an envelope file from numbered fragment files.
+    Envelope {
+        /// Directory of fragments named by sq.
+        #[arg(long)]
+        fragments: PathBuf,
+        /// First sq.
+        #[arg(long)]
+        first: u64,
+        /// Last sq, inclusive.
+        #[arg(long)]
+        last: u64,
+        /// The `.npy` file to write.
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Estimate the loop period of an envelope file.
+    Period {
+        /// Envelope file.
+        #[arg(long)]
+        env: PathBuf,
+        /// Smallest period to consider, in seconds.
+        #[arg(long)]
+        min: Option<f64>,
+        /// Largest period to consider, in seconds.
+        #[arg(long)]
+        max: Option<f64>,
+    },
+    /// Track the lag through an envelope file and report changes.
+    Scan {
+        /// Envelope file.
+        #[arg(long)]
+        env: PathBuf,
+        /// The known period, in seconds.
+        #[arg(long)]
+        period: f64,
+        /// Where to start, in seconds from the start of the file.
+        #[arg(long)]
+        from: Option<f64>,
+    },
+    /// Compare the last cycle of one envelope file with the last cycle of another.
+    Diff {
+        /// Envelope of the current version.
+        #[arg(long)]
+        env: PathBuf,
+        /// Period of the current version, in seconds.
+        #[arg(long)]
+        period: f64,
+        /// Envelope of the previous version.
+        #[arg(long)]
+        against: PathBuf,
+        /// Period of the previous version, in seconds.
+        #[arg(long)]
+        against_period: f64,
+        /// Envelope of a recurring clip.
+        #[arg(long)]
+        known: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -101,6 +160,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let Some(command) = cli.command else {
         return Ok(());
+    };
+    let json = cli.json;
+    let command = match run_offline(command, json).await? {
+        Some(command) => command,
+        None => return Ok(()),
     };
     let acquisition = Acquisition::new(AcquisitionOptions {
         policy: cli.ip_policy,
@@ -136,6 +200,11 @@ async fn main() -> anyhow::Result<()> {
             let report = library()?.sweep().await?;
             print_report(cli.json, &report, sweep_text)
         }
+        // `run_offline` has already handled these.
+        Command::Envelope { .. }
+        | Command::Period { .. }
+        | Command::Scan { .. }
+        | Command::Diff { .. } => Ok(()),
         Command::Fetch {
             stream,
             itag,
@@ -162,6 +231,106 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Runs a command that needs neither the network nor a library, and hands back any other.
+async fn run_offline(command: Command, json: bool) -> anyhow::Result<Option<Command>> {
+    let blocking = move || -> anyhow::Result<Option<Command>> {
+        match command {
+            Command::Envelope {
+                fragments,
+                first,
+                last,
+                output,
+            } => {
+                let report = offline::build_envelope(&fragments, first, last, &output)?;
+                print_report(json, &report, |report| {
+                    format!("fragments: {}\nbins: {}\n", report.fragments, report.bins)
+                })?;
+            }
+            Command::Period { env, min, max } => {
+                let defaults = PeriodConfig::default();
+                let config = PeriodConfig {
+                    min_period: min.unwrap_or(defaults.min_period),
+                    max_period: max.unwrap_or(defaults.max_period),
+                    ..defaults
+                };
+                print_report(json, &offline::period(&env, &config)?, period_text)?;
+            }
+            Command::Scan { env, period, from } => {
+                print_report(json, &offline::scan(&env, period, from)?, scan_text)?;
+            }
+            Command::Diff {
+                env,
+                period,
+                against,
+                against_period,
+                known,
+            } => {
+                let request = DiffRequest {
+                    current: env,
+                    period,
+                    against,
+                    against_period,
+                    older: Vec::new(),
+                    known,
+                };
+                print_report(json, &offline::diff(&request)?, diff_text)?;
+            }
+            other => return Ok(Some(other)),
+        }
+        Ok(None)
+    };
+    tokio::task::spawn_blocking(blocking).await?
+}
+
+fn period_text(report: &PeriodReport) -> String {
+    match (report.period, report.testable_up_to) {
+        (Some(period), _) => format!(
+            "period: {period:.1} s\nagreeing references: {}\nmatch at double: {}\n",
+            report.agreeing, report.confirmed_by_double
+        ),
+        (None, Some(limit)) => format!("no period found, testable up to {limit:.0} s\n"),
+        (None, None) => "no period found\n".to_string(),
+    }
+}
+
+fn scan_text(report: &ScanReport) -> String {
+    let runs = report.runs.iter().map(|run| {
+        let lag = run
+            .lag
+            .map_or(String::new(), |lag| format!(" lag {lag:.1} s"));
+        format!(
+            "{:.0}..{:.0} {:?}{lag} ({} points)\n",
+            run.start, run.end, run.kind, run.points
+        )
+    });
+    let signals = report
+        .signals
+        .iter()
+        .map(|signal| format!("signal: {signal:?}\n"));
+    runs.chain(signals).collect()
+}
+
+fn diff_text(report: &Diff) -> String {
+    let regions = report.regions.iter().map(|region| {
+        let moved = if region.moved { " (moved)" } else { "" };
+        format!(
+            "{:?}{moved} {:.0}..{:.0} ({:.0} s)\n",
+            region.class,
+            region.start,
+            region.end,
+            region.end - region.start
+        )
+    });
+    let checks = report.checks.iter().map(|check| {
+        let result = if check.passed { "ok" } else { "REVIEW" };
+        format!(
+            "{result}: {}: expected {:.1}, measured {:.1}\n",
+            check.name, check.expected, check.actual
+        )
+    });
+    regions.chain(checks).collect()
 }
 
 fn print_report<T: Serialize>(
