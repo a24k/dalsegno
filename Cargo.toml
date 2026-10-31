@@ -13,6 +13,8 @@ publish = false
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 fastrand = "2"
+rayon = "1"
+realfft = "3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -39,3 +41,10 @@ missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
 all = "warn"
+
+# Tests run FFTs over long series, which are far too slow unoptimised.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1
