@@ -17,7 +17,8 @@ pub struct DiffConfig {
     pub threshold: f32,
     /// Shifts within this many seconds belong to one region.
     pub shift_tolerance: f64,
-    /// A shift held for fewer windows is a brief flip.
+    /// A shift held for fewer windows is a brief flip. This must outlast repeated material,
+    /// which matches its other occurrences for as long as it plays.
     pub min_windows: usize,
     /// How far a self-check may be off, in seconds.
     pub check_tolerance: f64,
@@ -38,7 +39,7 @@ impl Default for DiffConfig {
             step: 30.0,
             threshold: 0.7,
             shift_tolerance: 3.0,
-            min_windows: 3,
+            min_windows: 10,
             check_tolerance: 5.0,
             min_deleted_seconds: 60.0,
             edge_window: 5.0,
@@ -100,6 +101,9 @@ pub struct Region {
     pub version: Option<i64>,
     /// Where the region starts in the matched version.
     pub match_start: Option<f64>,
+    /// Whether this is a copy out of the previous version's order, such as repeated material
+    /// placed in front of an addition. It counts as inserted.
+    pub moved: bool,
 }
 
 /// One automatic check of the result.
@@ -122,7 +126,7 @@ pub struct SelfCheck {
 pub struct Diff {
     /// Regions in time order, then deleted ones.
     pub regions: Vec<Region>,
-    /// Changes of shift between existing regions, in order.
+    /// Changes of shift along the regions that keep the previous version's order.
     pub shift_changes: Vec<f64>,
     /// The checks of FR-N8.
     pub checks: Vec<SelfCheck>,
@@ -166,12 +170,13 @@ pub fn compare(
         .iter()
         .map(|span| classify(span, edge(span), versions, known))
         .collect();
-    let mut regions = refine_edges(&classified, &spans, current, versions, config);
-    let shift_changes = shift_changes(&spans, versions);
+    let refined = refine_edges(&classified, &spans, current, versions, config);
+    let mut regions = mark_moved(&refined, versions);
+    let shift_changes = shift_changes(&regions, versions);
     let deleted = deleted_regions(&regions, versions, config);
     let inserted: f64 = regions
         .iter()
-        .filter(|region| region.class != RegionClass::Existing)
+        .filter(|region| region.class != RegionClass::Existing || region.moved)
         .map(|region| region.end - region.start)
         .sum();
     let removed: f64 = deleted.iter().map(|region| region.end - region.start).sum();
@@ -374,6 +379,7 @@ fn classify(
         shift: None,
         version: None,
         match_start: None,
+        moved: false,
     };
     match span.found {
         Some(found) => Region {
@@ -519,16 +525,67 @@ fn overlaps_known(start: f64, end: f64, known: &[KnownClip]) -> bool {
     })
 }
 
-/// Returns how far each existing region's shift moved from the one before.
-fn shift_changes(spans: &[Span], versions: &[VersionCycle<'_>]) -> Vec<f64> {
+/// Region edges are good to about this, in seconds, so overlaps up to it still count as in order.
+const ORDER_TOLERANCE: f64 = 60.0;
+
+/// Marks existing regions outside the longest stretch that keeps the old order.
+fn mark_moved(regions: &[Region], versions: &[VersionCycle<'_>]) -> Vec<Region> {
+    let Some(previous) = versions.first() else {
+        return regions.to_vec();
+    };
+    let existing: Vec<usize> = (0..regions.len())
+        .filter(|index| regions[*index].class == RegionClass::Existing)
+        .collect();
+    let old_start = |index: usize| {
+        let region = &regions[index];
+        (region.start - region.shift.unwrap_or(0.0)).rem_euclid(previous.period)
+    };
+    let duration = |index: usize| regions[index].end - regions[index].start;
+    let mut best: (f64, Vec<usize>) = (0.0, Vec::new());
+    for (position, base) in existing.iter().enumerate() {
+        let unrolled =
+            |index: usize| (old_start(index) - old_start(*base)).rem_euclid(previous.period);
+        let candidates = &existing[position..];
+        // The heaviest chain ending at each candidate.
+        let mut chains: Vec<(f64, Vec<usize>)> = Vec::with_capacity(candidates.len());
+        for (at, index) in candidates.iter().enumerate() {
+            let longest = (0..at)
+                .filter(|earlier| {
+                    let previous_end =
+                        unrolled(candidates[*earlier]) + duration(candidates[*earlier]);
+                    previous_end <= unrolled(*index) + ORDER_TOLERANCE
+                })
+                .max_by(|a, b| chains[*a].0.total_cmp(&chains[*b].0));
+            let (weight, mut chain) =
+                longest.map_or((0.0, Vec::new()), |earlier| chains[earlier].clone());
+            chain.push(*index);
+            chains.push((weight + duration(*index), chain));
+        }
+        if let Some(heaviest) = chains.into_iter().max_by(|a, b| a.0.total_cmp(&b.0))
+            && heaviest.0 > best.0
+        {
+            best = heaviest;
+        }
+    }
+    regions
+        .iter()
+        .enumerate()
+        .map(|(index, region)| Region {
+            moved: region.class == RegionClass::Existing && !best.1.contains(&index),
+            ..*region
+        })
+        .collect()
+}
+
+/// Returns how far the shift moved between regions that keep the old order.
+fn shift_changes(regions: &[Region], versions: &[VersionCycle<'_>]) -> Vec<f64> {
     let Some(previous) = versions.first() else {
         return Vec::new();
     };
-    let shifts: Vec<f64> = spans
+    let shifts: Vec<f64> = regions
         .iter()
-        .filter_map(|span| span.found)
-        .filter(|found| found.version == 0)
-        .map(|found| found.shift)
+        .filter(|region| region.class == RegionClass::Existing && !region.moved)
+        .filter_map(|region| region.shift)
         .collect();
     shifts
         .windows(2)
@@ -554,7 +611,7 @@ fn deleted_regions(
     };
     let mut covered: Vec<(f64, f64)> = regions
         .iter()
-        .filter(|region| region.class == RegionClass::Existing)
+        .filter(|region| region.class == RegionClass::Existing && !region.moved)
         .filter_map(|region| {
             let start = (region.start - region.shift?).rem_euclid(previous.period);
             Some((start, start + region.end - region.start))
@@ -585,6 +642,7 @@ fn deleted_regions(
             shift: None,
             version: Some(previous.id),
             match_start: None,
+            moved: false,
         })
         .collect()
 }
@@ -716,6 +774,29 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_out_of_order_counts_as_inserted() {
+        let old = content(20, P);
+        let insert = content(21, 500.0);
+        let copy = &old[2_000..6_000];
+        let new = [&old[..20_000], copy, &insert, &old[20_000..]].concat();
+
+        let diff = compare_cycles(&old, &new);
+
+        assert!(
+            diff.regions.iter().any(|region| region.moved),
+            "{:?}",
+            diff.regions
+        );
+        assert_eq!(diff.shift_changes.len(), 1, "{:?}", diff.shift_changes);
+        assert!((diff.shift_changes[0] - 900.0).abs() < 0.2);
+        assert!(
+            diff.checks.iter().all(|check| check.passed),
+            "{:?}",
+            diff.checks
+        );
+    }
+
+    #[test]
     fn a_registered_clip_is_known_and_not_new() {
         let old = content(8, P);
         let clip = content(9, 211.0);
@@ -766,7 +847,10 @@ mod tests {
             found(100.0),
             found(100.0),
         ];
-        let config = DiffConfig::default();
+        let config = DiffConfig {
+            min_windows: 3,
+            ..DiffConfig::default()
+        };
 
         let spans = consolidate(group(&items, &versions, &config), &versions, &config);
 
