@@ -54,8 +54,13 @@ Response classification, applied in one pure function so it can be unit tested:
 | 404 older than the DVR | `Lost`, recorded as a gap. |
 | 429, 503, 5xx | `Backoff`, exponential with jitter. |
 
-Files are written to a temporary name, fsynced, then renamed, and the database row is
-added last. A file without a row is orphaned and swept at start. Layout:
+Files are written to a unique temporary name, fsynced, then renamed, and the database row is
+added last, so a row always means a complete file, and a rerun skips fragments that have one. A
+file without a row is orphaned and removed by the sweep, as is a temporary file over an hour old.
+Before the row is written, timing is read from the bytes (FR-A9), so a 200 that is not a
+fragment is retried and never stored. WebM carries no duration, so its row records the stream's
+fragment length. Timing is read from WebM and audio mp4 only, so `probe` rejects mp4 video.
+Layout:
 
 ```text
 /data/fragments/<stream_id>/<itag>/<sq div 10000>/<sq>
@@ -124,14 +129,6 @@ of every format, so probing needs no further yt-dlp call.
 - **Video:** at most four candidates, best first. ffprobe confirms that both fragments start
   with a keyframe and that joining them keeps every packet, and ffmpeg must copy the join into
   an mp4. Using these tools covers WebM and mp4 sources without more parsing code.
-
-## Before the database
-
-Until milestone 2 there is no `fragments` table. `<stream_id>` in the layout is the video ID,
-a rerun skips files that exist, and the family state lasts one process. Temporary files have
-unique names, so a killed process leaves its file until the orphan sweep. A range fetch reports
-fragments that keep failing and carries on, and stops only for a failure that concerns every
-fragment: a stream that is gone, or no family left.
 
 ## Container reader
 

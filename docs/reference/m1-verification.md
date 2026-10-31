@@ -25,11 +25,7 @@ No URL appeared in any report or log of these runs.
 ## Not covered
 
 - That kill left no temporary file. An earlier run did, with a fixed temporary name that has since
-  changed. An abandoned file is ignored, which a unit test shows, and it stays on disk until the
-  orphan sweep of milestone 2 removes it.
+  changed. An abandoned file is ignored, which a unit test shows, and the sweep removes it.
 - `fetch.sh` itself was not rerun. Its saved fragments are the reference. They were fetched
   14 to 19 hours earlier, so fragment bytes were stable over at least that time.
-- Fragment bytes are not parsed during a range fetch, so a 200 with a wrong body would be stored
-  unless `X-Sequence-Num` disagrees. Milestone 2 reads timing from each fragment for the
-  `fragments` row, which closes this.
 - The disk floor and the DVR window checks of `ensure-range` belong to milestone 4.

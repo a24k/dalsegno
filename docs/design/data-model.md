@@ -3,6 +3,8 @@
 SQLite in WAL mode, with `foreign_keys = ON`. Migrations are embedded SQL files applied
 in order, tracked by `PRAGMA user_version`.
 
+Until milestone 5 starts the writer thread, the connection is shared behind a mutex.
+
 Conventions: `stream_time` is seconds of stream clock (`REAL`), always paired with a
 `stream_id` (D-10). `*_at` is epoch milliseconds UTC. JST is applied only for display.
 
@@ -59,7 +61,7 @@ CREATE TABLE gaps (
 CREATE TABLE envelope (
   stream_id INTEGER NOT NULL REFERENCES streams(id),
   sq INTEGER NOT NULL,
-  first_bin INTEGER NOT NULL,         -- floor(stream_time * rate) of the first value
+  first_bin INTEGER NOT NULL,         -- grid index of the first value; bin n starts at n / rate
   feature TEXT NOT NULL DEFAULT 'env10',
   data BLOB NOT NULL,                 -- little-endian f32
   PRIMARY KEY (stream_id, feature, sq)
