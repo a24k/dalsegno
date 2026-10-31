@@ -10,6 +10,16 @@ publish.workspace = true
 dalsegno-core.workspace = true
 dalsegno-io.workspace = true
 dalsegno-store.workspace = true
+fastrand.workspace = true
+serde.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+dalsegno-test-support.workspace = true
+wiremock.workspace = true
 
 [lints]
 workspace = true
