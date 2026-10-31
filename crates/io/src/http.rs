@@ -122,6 +122,7 @@ impl FragmentClient {
 fn build_client(bind: IpAddr) -> Result<Client, TransportError> {
     Ok(Client::builder()
         .local_address(bind)
+        .referer(false)
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .build()?)

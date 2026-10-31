@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 /// `sq` used only to read the head from the response headers.
 const HEAD_QUERY_SQ: u64 = 1;
-/// The head may still be written, so the checked pair ends one fragment behind it.
+/// Keeps the checked pair behind the head, so neither request is held open.
 const PROBE_DISTANCE_FROM_HEAD: u64 = 2;
 const MAX_VIDEO_CANDIDATES: usize = 4;
 const AAC_LC_OBJECT_TYPE: u8 = 2;

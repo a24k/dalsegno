@@ -221,15 +221,21 @@ impl<R: Resolver> Session<R> {
 
     async fn recover_family(&self) {
         let now = (self.clock)();
-        let mut family = self.family.lock().await;
-        if !family.probe_due(now) {
-            return;
-        }
-        let preferred = family.preferred();
+        let preferred = {
+            let family = self.family.lock().await;
+            if !family.probe_due(now) {
+                return;
+            }
+            family.preferred()
+        };
+        // Other streams must not wait on the shared family during a yt-dlp call.
         let result = self
             .resolver
             .resolve(&self.video, self.itag, preferred)
             .await;
-        family.on_probe_result(now, result.is_ok());
+        self.family
+            .lock()
+            .await
+            .on_probe_result(now, result.is_ok());
     }
 }

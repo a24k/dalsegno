@@ -1,11 +1,15 @@
 //! Fragment files on disk. Writes are atomic, so a stored fragment is always complete (FR-A7).
 
 use dalsegno_core::stream::VideoId;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const FRAGMENTS_PER_DIRECTORY: u64 = 10_000;
+
+static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
 /// Fragment storage under one data directory.
 #[derive(Debug, Clone)]
@@ -39,8 +43,11 @@ impl FragmentStore {
         let path = self.path(stream, itag, sq);
         let directory = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
         fs::create_dir_all(directory)?;
-        let temporary = path.with_extension("tmp");
-        let mut file = File::create(&temporary)?;
+        let temporary = unique_temporary(&path);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         fs::rename(&temporary, &path)?;
@@ -61,14 +68,41 @@ impl FragmentStore {
         last: u64,
         output: &Path,
     ) -> io::Result<()> {
-        let temporary = output.with_extension("part");
-        let mut writer = BufWriter::new(File::create(&temporary)?);
+        let temporary = with_suffix(output, ".part");
+        let joined = self.join_into(stream, itag, first, last, &temporary);
+        joined
+            .and_then(|()| fs::rename(&temporary, output))
+            .inspect_err(|_| {
+                let _ = fs::remove_file(&temporary);
+            })
+    }
+
+    fn join_into(
+        &self,
+        stream: &VideoId,
+        itag: u32,
+        first: u64,
+        last: u64,
+        target: &Path,
+    ) -> io::Result<()> {
+        let mut writer = BufWriter::new(File::create(target)?);
         for sq in first..=last {
             io::copy(&mut File::open(self.path(stream, itag, sq))?, &mut writer)?;
         }
-        writer.into_inner()?.sync_all()?;
-        fs::rename(temporary, output)
+        writer.into_inner()?.sync_all()
     }
+}
+
+// A fixed name would let two writers truncate each other's file just before the rename.
+fn unique_temporary(path: &Path) -> PathBuf {
+    let count = NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
+    with_suffix(path, &format!(".{}.{count}.tmp", process::id()))
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    name.into()
 }
 
 #[cfg(test)]
@@ -151,6 +185,55 @@ mod tests {
             .unwrap();
 
         assert_eq!(fs::read(output).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn concurrent_writers_never_publish_a_partial_fragment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FragmentStore::new(dir.path());
+        let payload = vec![7u8; 256 * 1024];
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..20 {
+                        store.write(&stream(), 140, 7, &payload).unwrap();
+                    }
+                });
+            }
+        });
+
+        assert_eq!(store.read(&stream(), 140, 7).unwrap(), payload);
+    }
+
+    #[test]
+    fn concat_keeps_the_extension_of_a_neighbouring_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FragmentStore::new(dir.path());
+        store.write(&stream(), 140, 1, b"a").unwrap();
+        let neighbour = dir.path().join("out.part");
+        fs::write(&neighbour, b"keep").unwrap();
+
+        store
+            .concat(&stream(), 140, 1, 1, &dir.path().join("out.mp4"))
+            .unwrap();
+
+        assert_eq!(fs::read(neighbour).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn failed_concat_removes_its_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FragmentStore::new(dir.path());
+        let output = dir.path().join("out");
+
+        store.concat(&stream(), 140, 1, 1, &output).unwrap_err();
+
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "no partial output may remain"
+        );
     }
 
     #[test]

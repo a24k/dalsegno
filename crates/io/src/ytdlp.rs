@@ -6,7 +6,7 @@ use dalsegno_core::stream::{IpFamily, VideoId};
 use serde::Deserialize;
 use std::ffi::OsString;
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -276,8 +276,13 @@ fn sanitise(line: &str) -> String {
 }
 
 fn is_sensitive(word: &str) -> bool {
-    let bare = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':');
-    word.contains("://") || word.contains('=') || bare.parse::<IpAddr>().is_ok()
+    let bracketed = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && !"[]".contains(c));
+    let with_colons = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':');
+    word.contains("://")
+        || word.contains('=')
+        || bracketed.parse::<SocketAddr>().is_ok()
+        || bracketed.trim_matches(['[', ']']).parse::<IpAddr>().is_ok()
+        || with_colons.parse::<IpAddr>().is_ok()
 }
 
 #[cfg(test)]
@@ -452,6 +457,18 @@ mod tests {
         assert!(!error.contains("192.0.2.1"), "{error}");
         assert!(!error.contains("2001:db8"), "{error}");
         assert!(error.contains("HTTP 500"), "{error}");
+    }
+
+    #[test]
+    fn failure_messages_drop_addresses_with_ports() {
+        let error = classify_failure(
+            "ERROR: connect to 192.0.2.1:443 failed, then [2001:db8::1]:443, (192.0.2.2:80): reset",
+        )
+        .to_string();
+
+        assert!(!error.contains("192.0.2"), "{error}");
+        assert!(!error.contains("2001:db8"), "{error}");
+        assert!(error.contains("failed"), "{error}");
     }
 
     #[test]

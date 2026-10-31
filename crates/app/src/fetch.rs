@@ -15,6 +15,10 @@ use tokio::sync::Mutex;
 use tokio::task::{JoinSet, spawn_blocking};
 use tokio::time::Instant;
 
+/// More than 120 hours of fragments, even at a fragment length well under 5 s.
+const MAX_RANGE_FRAGMENTS: u64 = 100_000;
+const REQUEST_RATES: std::ops::RangeInclusive<f64> = 0.01..=1_000_000.0;
+
 /// The inclusive range to fetch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchRange {
@@ -185,9 +189,12 @@ fn validate(limits: &FetchLimits, range: &FetchRange) -> Result<(), AcquireError
     if limits.concurrency == 0 {
         return Err(AcquireError::InvalidRequest("concurrency must be positive"));
     }
-    if !limits.requests_per_second.is_finite() || limits.requests_per_second <= 0.0 {
+    if range.last - range.first >= MAX_RANGE_FRAGMENTS {
+        return Err(AcquireError::InvalidRequest("the range exceeds the DVR"));
+    }
+    if !REQUEST_RATES.contains(&limits.requests_per_second) {
         return Err(AcquireError::InvalidRequest(
-            "the request rate must be positive",
+            "the request rate is out of range",
         ));
     }
     Ok(())
@@ -254,7 +261,7 @@ impl<R: Resolver> Run<R> {
                 }
                 Outcome::RefreshUrl => {
                     self.fetcher.session.report_refused(&lease).await?;
-                    continue;
+                    Duration::ZERO
                 }
                 Outcome::Empty => {
                     self.fetcher.session.report_empty(&lease).await?;

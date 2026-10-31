@@ -608,6 +608,10 @@ async fn invalid_requests_are_rejected_before_any_network_use() {
             concurrency: 1,
             requests_per_second: f64::NAN,
         },
+        FetchLimits {
+            concurrency: 1,
+            requests_per_second: 1e-300,
+        },
     ];
 
     assert!(matches!(
@@ -621,6 +625,40 @@ async fn invalid_requests_are_rejected_before_any_network_use() {
         ));
     }
     assert_eq!(harness.resolver.calls(), 0);
+}
+
+#[tokio::test]
+async fn one_refused_fragment_cannot_keep_resolving_while_others_succeed() {
+    let harness = Harness::new(IpPolicy::V4Only).await;
+    Mock::given(query_param("sq", "1"))
+        .respond_with(ResponseTemplate::new(403).set_delay(Duration::from_millis(100)))
+        .mount(&harness.server)
+        .await;
+    serve_all(&harness.server).await;
+    let limits = FetchLimits {
+        concurrency: 2,
+        requests_per_second: 10_000.0,
+    };
+
+    let _ = harness.fetch_with(limits, 1, 60).await;
+
+    assert!(
+        harness.resolver.calls() <= 5,
+        "{}",
+        harness.resolver.calls()
+    );
+}
+
+#[tokio::test]
+async fn ranges_longer_than_the_dvr_are_rejected() {
+    let harness = Harness::new(IpPolicy::V4Only).await;
+
+    for (first, last) in [(0, u64::MAX), (1, 1_000_000)] {
+        assert!(matches!(
+            harness.fetch(first, last).await,
+            Err(AcquireError::InvalidRequest(_))
+        ));
+    }
 }
 
 #[tokio::test]
