@@ -31,6 +31,8 @@ use tokio::task::spawn_blocking;
 
 const YT_DLP: &str = "yt-dlp";
 const DATABASE_FILE: &str = "dalsegno.sqlite3";
+/// Local files of exports in progress, under the data directory.
+const WORK_DIRECTORY: &str = "work";
 const MILLIS_PER_SECOND: i64 = 1_000;
 
 /// Settings shared by the acquisition use cases.
@@ -45,8 +47,9 @@ pub struct AcquisitionOptions {
 /// The database and fragment files under one data directory.
 #[derive(Debug, Clone)]
 pub struct Library {
-    database: SharedDatabase,
-    store: FragmentStore,
+    pub(crate) database: SharedDatabase,
+    pub(crate) store: FragmentStore,
+    pub(crate) work: PathBuf,
 }
 
 impl Library {
@@ -57,10 +60,11 @@ impl Library {
         Ok(Self {
             database: Arc::new(Mutex::new(database)),
             store: FragmentStore::new(data_dir),
+            work: data_dir.join(WORK_DIRECTORY),
         })
     }
 
-    fn registered(&self, input: &str) -> Result<StreamRow, AcquireError> {
+    pub(crate) fn registered(&self, input: &str) -> Result<StreamRow, AcquireError> {
         let video = parse_stream(input)?;
         lock(&self.database)?
             .stream_by_video_id(video.as_str())?
@@ -225,7 +229,7 @@ impl Acquisition {
         backfill(Arc::new(fetcher), row.stream.fragment_len, hours).await
     }
 
-    fn fetcher(
+    pub(crate) fn fetcher(
         &self,
         library: &Library,
         row: &StreamRow,

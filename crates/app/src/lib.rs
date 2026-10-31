@@ -5,6 +5,7 @@ pub use dalsegno_core::analysis;
 pub mod backfill;
 pub mod doctor;
 pub mod error;
+pub mod export;
 pub mod family;
 pub mod features;
 pub mod fetch;
