@@ -1,0 +1,20 @@
+[package]
+name = "dalsegno"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dalsegno"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+dalsegno-app.workspace = true
+dalsegno-server.workspace = true
+
+[lints]
+workspace = true

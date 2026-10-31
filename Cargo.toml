@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/a24k/dalsegno"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+
+dalsegno-core = { path = "crates/core" }
+dalsegno-store = { path = "crates/store" }
+dalsegno-io = { path = "crates/io" }
+dalsegno-app = { path = "crates/app" }
+dalsegno-server = { path = "crates/server" }
+dalsegno-test-support = { path = "crates/test-support" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
