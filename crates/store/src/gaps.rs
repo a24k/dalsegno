@@ -76,6 +76,20 @@ impl Database {
         Ok(gaps)
     }
 
+    /// Returns the ranges of open and lost gaps, which need no new record.
+    pub fn unfilled_gaps(&self, stream_id: i64, itag: u32) -> Result<Vec<(u64, u64)>, StoreError> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT sq_first, sq_last FROM gaps \
+             WHERE stream_id = ?1 AND itag = ?2 AND status != 'filled'",
+        )?;
+        let ranges = statement
+            .query_map(params![stream_id, itag], |row| {
+                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64))
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(ranges)
+    }
+
     /// Changes a gap's status.
     pub fn set_gap_status(&self, id: i64, status: GapStatus) -> Result<(), StoreError> {
         self.connection.execute(
@@ -125,6 +139,22 @@ mod tests {
         database.set_gap_status(lost, GapStatus::Lost).unwrap();
 
         assert_eq!(database.open_gaps(id, 140).unwrap(), []);
+    }
+
+    #[test]
+    fn unfilled_gaps_include_lost_ones() {
+        let database = Database::open_in_memory().unwrap();
+        let id = stream(&database);
+        let filled = database.add_gap(id, 140, 1, 2).unwrap();
+        let lost = database.add_gap(id, 140, 3, 4).unwrap();
+        database.add_gap(id, 140, 5, 6).unwrap();
+        database.set_gap_status(filled, GapStatus::Filled).unwrap();
+        database.set_gap_status(lost, GapStatus::Lost).unwrap();
+
+        let mut ranges = database.unfilled_gaps(id, 140).unwrap();
+        ranges.sort_unstable();
+
+        assert_eq!(ranges, [(3, 4), (5, 6)]);
     }
 
     #[test]

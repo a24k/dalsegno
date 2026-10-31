@@ -2,6 +2,7 @@
 
 use dalsegno_core::stream::IpFamily;
 use dalsegno_io::http::TransportError;
+use dalsegno_store::database::StoreError;
 use std::io;
 
 /// Why an acquisition use case stopped.
@@ -25,6 +26,15 @@ pub enum AcquireError {
     /// The disk refused a write.
     #[error("fragment storage failed: {0}")]
     Store(#[from] io::Error),
+    /// The database refused an operation.
+    #[error("{0}")]
+    Database(#[from] StoreError),
+    /// The stream has not been added yet.
+    #[error("stream {0} is not registered, run add first")]
+    NotRegistered(String),
+    /// The probe found no usable audio.
+    #[error("no audio format passed its checks")]
+    NoAudio,
     /// The HTTP client failed outside a fragment request.
     #[error("HTTP client failed: {0}")]
     Transport(#[from] TransportError),

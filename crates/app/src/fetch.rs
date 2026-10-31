@@ -1,29 +1,35 @@
-//! Fetching a range of fragments. Stored fragments are skipped, so a rerun resumes (FR-A7).
+//! Fetching a range of fragments. The file comes first and the row last, so a row always means
+//! a complete file, and fragments with a row are skipped, so a rerun resumes (FR-A7).
 
 use crate::error::AcquireError;
-use crate::session::Session;
+use crate::session::{Clock, Session};
 use dalsegno_core::acquisition::{Outcome, ResponseFacts, backoff_delay, classify};
-use dalsegno_core::stream::VideoId;
+use dalsegno_core::container::{FragmentTiming, read_timing};
 use dalsegno_io::fragments::FragmentStore;
 use dalsegno_io::http::{FragmentClient, FragmentResponse};
 use dalsegno_io::ytdlp::Resolver;
+use dalsegno_store::database::Database;
+use dalsegno_store::fragments::{FragmentRow, HeadSample};
 use serde::Serialize;
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{BTreeSet, VecDeque};
+use std::fmt;
+use std::sync::{Arc, MutexGuard};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task::{JoinSet, spawn_blocking};
 use tokio::time::Instant;
 
 /// More than 120 hours of fragments, even at a fragment length well under 5 s.
-const MAX_RANGE_FRAGMENTS: u64 = 100_000;
+pub const MAX_RANGE_FRAGMENTS: u64 = 100_000;
+const MILLIS_PER_SECOND: i64 = 1_000;
+const HEAD_SAMPLE_INTERVAL_MS: i64 = 60_000;
 const REQUEST_RATES: std::ops::RangeInclusive<f64> = 0.01..=1_000_000.0;
 
 /// The inclusive range to fetch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchRange {
     /// Stream.
-    pub video: VideoId,
+    pub stream_id: i64,
     /// Format.
     pub itag: u32,
     /// First `sq`.
@@ -91,8 +97,28 @@ impl FetchReport {
     }
 }
 
+/// The database, shared by tasks and locked for short operations only.
+pub type SharedDatabase = Arc<std::sync::Mutex<Database>>;
+
+/// Locks the database.
+pub fn lock(database: &SharedDatabase) -> Result<MutexGuard<'_, Database>, AcquireError> {
+    database.lock().map_err(|_| AcquireError::Task)
+}
+
+/// Where a fetch records what it stored.
+#[derive(Debug, Clone)]
+pub struct Ledger {
+    /// Database.
+    pub database: SharedDatabase,
+    /// Stream.
+    pub stream_id: i64,
+    /// Format being fetched.
+    pub itag: u32,
+    /// Duration recorded for formats whose fragments do not carry one.
+    pub fragment_len: f64,
+}
+
 /// The parts a range fetch works with.
-#[derive(Debug)]
 pub struct Fetcher<R> {
     /// Lease handling for the stream and format being fetched.
     pub session: Session<R>,
@@ -104,6 +130,20 @@ pub struct Fetcher<R> {
     pub limits: FetchLimits,
     /// Retry behaviour.
     pub retry: RetryPolicy,
+    /// Database records.
+    pub ledger: Ledger,
+    /// Time source.
+    pub clock: Clock,
+}
+
+impl<R> fmt::Debug for Fetcher<R> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Fetcher")
+            .field("session", &self.session)
+            .field("limits", &self.limits)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,8 +180,9 @@ impl Pacer {
 
 #[derive(Debug)]
 struct Run<R> {
-    fetcher: Fetcher<R>,
+    fetcher: Arc<Fetcher<R>>,
     range: FetchRange,
+    last_head_sample: Mutex<i64>,
     pacer: Pacer,
     queue: Mutex<VecDeque<u64>>,
     report: Mutex<FetchReport>,
@@ -149,15 +190,11 @@ struct Run<R> {
 
 /// Fetches every fragment of `range` that is not stored yet, oldest first.
 pub async fn fetch_range<R: Resolver>(
-    fetcher: Fetcher<R>,
+    fetcher: Arc<Fetcher<R>>,
     range: FetchRange,
 ) -> Result<FetchReport, AcquireError> {
     validate(&fetcher.limits, &range)?;
-    let store = fetcher.store.clone();
-    let wanted = range.clone();
-    let missing = spawn_blocking(move || missing_fragments(&store, &wanted))
-        .await
-        .map_err(|_| AcquireError::Task)?;
+    let missing = missing_fragments(&fetcher.ledger.database, &range)?;
     let total = range.last - range.first + 1;
     let already_stored = total - missing.len() as u64;
     let concurrency = fetcher.limits.concurrency;
@@ -165,6 +202,7 @@ pub async fn fetch_range<R: Resolver>(
         pacer: Pacer::new(fetcher.limits.requests_per_second),
         fetcher,
         range,
+        last_head_sample: Mutex::new(i64::MIN),
         queue: Mutex::new(missing),
         report: Mutex::new(FetchReport {
             already_stored,
@@ -200,10 +238,18 @@ fn validate(limits: &FetchLimits, range: &FetchRange) -> Result<(), AcquireError
     Ok(())
 }
 
-fn missing_fragments(store: &FragmentStore, range: &FetchRange) -> VecDeque<u64> {
-    (range.first..=range.last)
-        .filter(|sq| !store.contains(&range.video, range.itag, *sq))
-        .collect()
+fn missing_fragments(
+    database: &SharedDatabase,
+    range: &FetchRange,
+) -> Result<VecDeque<u64>, AcquireError> {
+    let stored: BTreeSet<u64> = lock(database)?
+        .fragments_in_range(range.stream_id, range.itag, range.first, range.last)?
+        .iter()
+        .map(|row| row.sq)
+        .collect();
+    Ok((range.first..=range.last)
+        .filter(|sq| !stored.contains(sq))
+        .collect())
 }
 
 fn sorted(report: FetchReport) -> FetchReport {
@@ -241,22 +287,37 @@ impl<R: Resolver> Run<R> {
             let lease = self.fetcher.session.lease().await?;
             self.pacer.wait().await;
             let response = self.fetcher.client.get(&lease.url, sq, lease.family).await;
-            let (outcome, body) = match response {
-                Ok(response) => split(sq, response),
+            let (outcome, response) = match response {
+                Ok(response) => (outcome_of(sq, &response), Some(response)),
                 Err(error) => {
-                    tracing::warn!(stream = %self.range.video, sq, %error, "fragment request failed");
-                    (Outcome::Backoff, Vec::new())
+                    tracing::warn!(stream = self.range.stream_id, sq, %error, "request failed");
+                    (Outcome::Backoff, None)
                 }
             };
             let delay = match outcome {
                 Outcome::Success => {
-                    self.store(sq, body).await?;
-                    self.fetcher.session.report_success(&lease).await;
-                    return Ok(FragmentResult::Fetched);
+                    let response = response.ok_or(AcquireError::Task)?;
+                    match read_timing(&response.body) {
+                        Ok(timing) => {
+                            self.record(sq, timing, response).await?;
+                            self.fetcher.session.report_success(&lease).await;
+                            return Ok(FragmentResult::Fetched);
+                        }
+                        Err(error) => {
+                            let stream = self.range.stream_id;
+                            tracing::warn!(stream, sq, %error, "unreadable fragment");
+                            backoff_delay(retry.base_delay, attempts, fastrand::f64())
+                        }
+                    }
                 }
                 Outcome::Lost => return Ok(FragmentResult::Lost),
                 Outcome::Unexpected(status) => {
-                    tracing::warn!(stream = %self.range.video, sq, status, "unexpected status");
+                    tracing::warn!(
+                        stream = self.range.stream_id,
+                        sq,
+                        status,
+                        "unexpected status"
+                    );
                     return Ok(FragmentResult::Failed);
                 }
                 Outcome::RefreshUrl => {
@@ -278,23 +339,67 @@ impl<R: Resolver> Run<R> {
         }
     }
 
-    async fn store(&self, sq: u64, body: Vec<u8>) -> Result<(), AcquireError> {
-        let store = self.fetcher.store.clone();
-        let video = self.range.video.clone();
-        let itag = self.range.itag;
-        spawn_blocking(move || store.write(&video, itag, sq, &body))
-            .await
-            .map_err(|_| AcquireError::Task)??;
-        Ok(())
+    async fn record(
+        &self,
+        sq: u64,
+        timing: FragmentTiming,
+        response: FragmentResponse,
+    ) -> Result<(), AcquireError> {
+        let now = (self.fetcher.clock)() as i64 * MILLIS_PER_SECOND;
+        let head = self.head_sample(&response, now).await;
+        let fetcher = Arc::clone(&self.fetcher);
+        let range = self.range.clone();
+        let ledger_len = fetcher.ledger.fragment_len;
+        let row = FragmentRow {
+            stream_id: range.stream_id,
+            itag: range.itag,
+            sq,
+            stream_time: timing.start_time,
+            duration: timing.duration.unwrap_or(ledger_len),
+            size: response.body.len() as u64,
+            fetched_at: now,
+        };
+        spawn_blocking(move || {
+            let store = &fetcher.store;
+            store.write(range.stream_id, range.itag, sq, &response.body)?;
+            let database = lock(&fetcher.ledger.database)?;
+            database.put_fragment(&row)?;
+            database.set_last_fetch(range.stream_id, now)?;
+            if let Some(sample) = head {
+                database.put_head_sample(&sample)?;
+            }
+            Ok::<_, AcquireError>(())
+        })
+        .await
+        .map_err(|_| AcquireError::Task)?
+    }
+
+    /// Returns a sample from these headers, at most once a minute.
+    async fn head_sample(&self, response: &FragmentResponse, now: i64) -> Option<HeadSample> {
+        let observed_at = response.walltime_ms.map_or(now, |value| value as i64);
+        let mut last = self.last_head_sample.lock().await;
+        if observed_at.saturating_sub(*last) < HEAD_SAMPLE_INTERVAL_MS {
+            return None;
+        }
+        let sample = HeadSample {
+            stream_id: self.range.stream_id,
+            observed_at,
+            head_sq: response.head_seqnum?,
+            head_time: response.head_time_ms? as f64 / MILLIS_PER_SECOND as f64,
+        };
+        *last = observed_at;
+        Some(sample)
     }
 }
 
-fn split(sq: u64, response: FragmentResponse) -> (Outcome, Vec<u8>) {
-    let facts = ResponseFacts {
-        status: response.status,
-        body_len: response.body.len(),
-        head_seqnum: response.head_seqnum,
-        sequence_num: response.sequence_num,
-    };
-    (classify(sq, facts), response.body)
+fn outcome_of(sq: u64, response: &FragmentResponse) -> Outcome {
+    classify(
+        sq,
+        ResponseFacts {
+            status: response.status,
+            body_len: response.body.len(),
+            head_seqnum: response.head_seqnum,
+            sequence_num: response.sequence_num,
+        },
+    )
 }

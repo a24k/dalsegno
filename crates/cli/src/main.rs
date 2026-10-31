@@ -1,11 +1,16 @@
 //! Command-line entry point.
 
-use anyhow::bail;
+use anyhow::{anyhow, bail};
 use clap::{Parser, Subcommand};
-use dalsegno_app::acquisition::{Acquisition, AcquisitionOptions, FetchRequest};
+use dalsegno_app::acquisition::{
+    Acquisition, AcquisitionOptions, AddReport, FetchRequest, Library,
+};
+use dalsegno_app::backfill::{BackfillReport, DEFAULT_HOURS};
 use dalsegno_app::doctor::DoctorReport;
+use dalsegno_app::features::FeatureReport;
 use dalsegno_app::fetch::FetchReport;
 use dalsegno_app::probe::ProbeReport;
+use dalsegno_app::retention::SweepReport;
 use serde::Serialize;
 use std::path::PathBuf;
 use tracing_subscriber::filter::LevelFilter;
@@ -28,6 +33,9 @@ struct Cli {
     /// Cookie file for yt-dlp.
     #[arg(long, global = true, env = "DALSEGNO_COOKIES")]
     cookies: Option<PathBuf>,
+    /// Directory that holds the database and fragments.
+    #[arg(long, global = true, env = "DALSEGNO_DATA")]
+    data_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -45,6 +53,11 @@ enum Command {
         /// Video ID or URL.
         stream: String,
     },
+    /// Probe a stream and register it.
+    Add {
+        /// Video ID or URL.
+        stream: String,
+    },
     /// Fetch a range of fragments. Stored fragments are skipped, so a rerun resumes.
     Fetch {
         /// Video ID or URL.
@@ -58,13 +71,25 @@ enum Command {
         /// Last sq, inclusive.
         #[arg(long)]
         last: u64,
-        /// Directory that holds fragments.
-        #[arg(long, env = "DALSEGNO_DATA")]
-        data_dir: PathBuf,
         /// Join the range into this file once it is complete.
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// Fill the recent past of a stream's audio from the DVR, oldest first.
+    Backfill {
+        /// Video ID or URL.
+        stream: String,
+        /// How far back to reach.
+        #[arg(long, default_value_t = DEFAULT_HOURS)]
+        hours: f64,
+    },
+    /// Bring a stream's envelope up to date with its stored audio.
+    Features {
+        /// Video ID or URL.
+        stream: String,
+    },
+    /// Remove fragments past retention and repair differences between files and rows.
+    Sweep,
 }
 
 #[tokio::main]
@@ -81,6 +106,11 @@ async fn main() -> anyhow::Result<()> {
         policy: cli.ip_policy,
         cookies: cli.cookies,
     })?;
+    let data_dir = cli.data_dir;
+    let library = || match &data_dir {
+        Some(path) => Ok(Library::open(path)?),
+        None => anyhow::Result::Err(anyhow!("this command needs --data-dir or DALSEGNO_DATA")),
+    };
     match command {
         Command::Doctor { stream } => {
             let report = acquisition.doctor(stream.as_deref()).await?;
@@ -90,12 +120,27 @@ async fn main() -> anyhow::Result<()> {
             let report = acquisition.probe(&stream).await?;
             print_report(cli.json, &report, probe_text)
         }
+        Command::Add { stream } => {
+            let report = acquisition.add(&library()?, &stream).await?;
+            print_report(cli.json, &report, add_text)
+        }
+        Command::Backfill { stream, hours } => {
+            let report = acquisition.backfill(&library()?, &stream, hours).await?;
+            print_report(cli.json, &report, backfill_text)
+        }
+        Command::Features { stream } => {
+            let report = library()?.features(&stream).await?;
+            print_report(cli.json, &report, features_text)
+        }
+        Command::Sweep => {
+            let report = library()?.sweep().await?;
+            print_report(cli.json, &report, sweep_text)
+        }
         Command::Fetch {
             stream,
             itag,
             first,
             last,
-            data_dir,
             output,
         } => {
             let request = FetchRequest {
@@ -103,10 +148,9 @@ async fn main() -> anyhow::Result<()> {
                 itag,
                 first,
                 last,
-                data_dir,
                 output,
             };
-            let report = acquisition.fetch(request).await?;
+            let report = acquisition.fetch(&library()?, request).await?;
             print_report(cli.json, &report, fetch_text)?;
             if !report.is_complete() {
                 bail!(
@@ -197,6 +241,38 @@ fn probe_text(report: &ProbeReport) -> String {
         .iter()
         .map(|rejection| format!("rejected itag {}: {}\n", rejection.itag, rejection.reason));
     std::iter::once(summary).chain(rejected).collect()
+}
+
+fn add_text(report: &AddReport) -> String {
+    format!(
+        "stream id: {}\n{}",
+        report.stream_id,
+        probe_text(&report.probe)
+    )
+}
+
+fn backfill_text(report: &BackfillReport) -> String {
+    format!(
+        "head sq: {}\nfetched: {}\nlost: {}\nstill open: {}\n",
+        report.head_sq, report.fetched, report.lost, report.failed
+    )
+}
+
+fn features_text(report: &FeatureReport) -> String {
+    format!(
+        "fragments: {}\nbins: {}\nruns: {}\nunreadable: {}\n",
+        report.fragments,
+        report.bins,
+        report.runs,
+        report.unreadable.len()
+    )
+}
+
+fn sweep_text(report: &SweepReport) -> String {
+    format!(
+        "expired: {}\norphans: {}\ntemporary: {}\nrepaired rows: {}\n",
+        report.expired, report.orphans, report.temporary, report.repaired
+    )
 }
 
 fn fetch_text(report: &FetchReport) -> String {

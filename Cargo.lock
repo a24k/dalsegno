@@ -296,6 +296,7 @@ dependencies = [
  "dalsegno-store",
  "dalsegno-test-support",
  "fastrand",
+ "rusqlite",
  "serde",
  "tempfile",
  "thiserror",

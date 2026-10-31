@@ -1,11 +1,12 @@
 //! Fragment files on disk. Writes are atomic, so a stored fragment is always complete (FR-A7).
 
-use dalsegno_core::stream::VideoId;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 const FRAGMENTS_PER_DIRECTORY: u64 = 10_000;
 
@@ -25,21 +26,21 @@ impl FragmentStore {
         }
     }
 
-    fn path(&self, stream: &VideoId, itag: u32, sq: u64) -> PathBuf {
+    fn path(&self, stream: i64, itag: u32, sq: u64) -> PathBuf {
         self.root
-            .join(stream.as_str())
+            .join(stream.to_string())
             .join(itag.to_string())
             .join((sq / FRAGMENTS_PER_DIRECTORY).to_string())
             .join(sq.to_string())
     }
 
     /// Returns whether a complete fragment is stored.
-    pub fn contains(&self, stream: &VideoId, itag: u32, sq: u64) -> bool {
+    pub fn contains(&self, stream: i64, itag: u32, sq: u64) -> bool {
         fs::metadata(self.path(stream, itag, sq)).is_ok_and(|metadata| metadata.len() > 0)
     }
 
     /// Writes to a temporary name, syncs, then renames.
-    pub fn write(&self, stream: &VideoId, itag: u32, sq: u64, bytes: &[u8]) -> io::Result<()> {
+    pub fn write(&self, stream: i64, itag: u32, sq: u64, bytes: &[u8]) -> io::Result<()> {
         let path = self.path(stream, itag, sq);
         let directory = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
         fs::create_dir_all(directory)?;
@@ -54,15 +55,39 @@ impl FragmentStore {
         File::open(directory)?.sync_all()
     }
 
+    /// Removes a fragment's file. An absent file is not an error.
+    pub fn remove(&self, stream: i64, itag: u32, sq: u64) -> io::Result<()> {
+        match fs::remove_file(self.path(stream, itag, sq)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// Lists every file under the store. Names that are not fragments have no key.
+    pub fn files(&self) -> io::Result<Vec<StoredFile>> {
+        let mut files = Vec::new();
+        for stream in subdirectories(&self.root)? {
+            for track in subdirectories(&stream)? {
+                for bucket in subdirectories(&track)? {
+                    for entry in fs::read_dir(&bucket)? {
+                        let path = entry?.path();
+                        files.push(StoredFile::describe(&stream, &track, path)?);
+                    }
+                }
+            }
+        }
+        Ok(files)
+    }
+
     /// Reads one stored fragment.
-    pub fn read(&self, stream: &VideoId, itag: u32, sq: u64) -> io::Result<Vec<u8>> {
+    pub fn read(&self, stream: i64, itag: u32, sq: u64) -> io::Result<Vec<u8>> {
         fs::read(self.path(stream, itag, sq))
     }
 
     /// Joins `first..=last` in `sq` order into `output`, which appears only when complete.
     pub fn concat(
         &self,
-        stream: &VideoId,
+        stream: i64,
         itag: u32,
         first: u64,
         last: u64,
@@ -79,7 +104,7 @@ impl FragmentStore {
 
     fn join_into(
         &self,
-        stream: &VideoId,
+        stream: i64,
         itag: u32,
         first: u64,
         last: u64,
@@ -90,6 +115,49 @@ impl FragmentStore {
             io::copy(&mut File::open(self.path(stream, itag, sq))?, &mut writer)?;
         }
         writer.into_inner()?.sync_all()
+    }
+}
+
+/// One file found under the store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredFile {
+    /// Where it is.
+    pub path: PathBuf,
+    /// Stream, format and `sq`, when the name is a fragment's.
+    pub key: Option<(i64, u32, u64)>,
+    /// Whether the name is a temporary one.
+    pub is_temporary: bool,
+    /// Last change.
+    pub modified: SystemTime,
+}
+
+impl StoredFile {
+    fn describe(stream: &Path, track: &Path, path: PathBuf) -> io::Result<Self> {
+        let key = number(stream)
+            .zip(number(track))
+            .zip(number(&path))
+            .map(|((stream, itag), sq)| (stream, itag, sq));
+        Ok(Self {
+            is_temporary: path.extension().is_some_and(|extension| extension == "tmp"),
+            modified: fs::metadata(&path)?.modified()?,
+            key,
+            path,
+        })
+    }
+}
+
+fn number<T: FromStr>(path: &Path) -> Option<T> {
+    path.file_name()?.to_str()?.parse().ok()
+}
+
+fn subdirectories(path: &Path) -> io::Result<Vec<PathBuf>> {
+    match fs::read_dir(path) {
+        Ok(entries) => entries
+            .map(|entry| entry.map(|entry| entry.path()))
+            .filter(|path| path.as_ref().map_or(true, |path| path.is_dir()))
+            .collect(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
     }
 }
 
@@ -109,8 +177,10 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn stream() -> VideoId {
-        VideoId::parse("abcDEF123_-").unwrap()
+    const STREAM: i64 = 3;
+
+    fn stream() -> i64 {
+        STREAM
     }
 
     #[test]
@@ -118,8 +188,8 @@ mod tests {
         let store = FragmentStore::new(Path::new("/data"));
 
         assert_eq!(
-            store.path(&stream(), 140, 2_453_470),
-            Path::new("/data/fragments/abcDEF123_-/140/245/2453470")
+            store.path(stream(), 140, 2_453_470),
+            Path::new("/data/fragments/3/140/245/2453470")
         );
     }
 
@@ -128,10 +198,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = FragmentStore::new(dir.path());
 
-        store.write(&stream(), 140, 7, b"payload").unwrap();
+        store.write(stream(), 140, 7, b"payload").unwrap();
 
-        assert!(store.contains(&stream(), 140, 7));
-        assert_eq!(store.read(&stream(), 140, 7).unwrap(), b"payload");
+        assert!(store.contains(stream(), 140, 7));
+        assert_eq!(store.read(stream(), 140, 7).unwrap(), b"payload");
     }
 
     #[test]
@@ -139,10 +209,47 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = FragmentStore::new(dir.path());
 
-        store.write(&stream(), 140, 7, b"").unwrap();
+        store.write(stream(), 140, 7, b"").unwrap();
 
-        assert!(!store.contains(&stream(), 140, 7));
-        assert!(!store.contains(&stream(), 140, 8));
+        assert!(!store.contains(stream(), 140, 7));
+        assert!(!store.contains(stream(), 140, 8));
+    }
+
+    #[test]
+    fn removing_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FragmentStore::new(dir.path());
+        store.write(stream(), 140, 7, b"payload").unwrap();
+
+        store.remove(stream(), 140, 7).unwrap();
+        store.remove(stream(), 140, 7).unwrap();
+
+        assert!(!store.contains(stream(), 140, 7));
+    }
+
+    #[test]
+    fn files_lists_fragments_and_other_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FragmentStore::new(dir.path());
+        store.write(stream(), 140, 7, b"payload").unwrap();
+        let path = store.path(stream(), 140, 7);
+        fs::write(unique_temporary(&path), b"par").unwrap();
+
+        let mut files = store.files().unwrap();
+        files.sort_by_key(|file| file.key.is_none());
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].key, Some((STREAM, 140, 7)));
+        assert!(!files[0].is_temporary);
+        assert_eq!(files[1].key, None);
+        assert!(files[1].is_temporary);
+    }
+
+    #[test]
+    fn an_empty_store_has_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert_eq!(FragmentStore::new(dir.path()).files().unwrap(), []);
     }
 
     #[test]
@@ -150,9 +257,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = FragmentStore::new(dir.path());
 
-        store.write(&stream(), 140, 7, b"payload").unwrap();
+        store.write(stream(), 140, 7, b"payload").unwrap();
 
-        let parent = store.path(&stream(), 140, 7);
+        let parent = store.path(stream(), 140, 7);
         let entries = fs::read_dir(parent.parent().unwrap()).unwrap().count();
         assert_eq!(entries, 1);
     }
@@ -161,28 +268,26 @@ mod tests {
     fn interrupted_write_is_replaced_on_retry() {
         let dir = tempfile::tempdir().unwrap();
         let store = FragmentStore::new(dir.path());
-        store.write(&stream(), 140, 6, b"other").unwrap();
-        let path = store.path(&stream(), 140, 7);
+        store.write(stream(), 140, 6, b"other").unwrap();
+        let path = store.path(stream(), 140, 7);
         fs::write(path.with_extension("tmp"), b"par").unwrap();
 
-        assert!(!store.contains(&stream(), 140, 7));
-        store.write(&stream(), 140, 7, b"payload").unwrap();
+        assert!(!store.contains(stream(), 140, 7));
+        store.write(stream(), 140, 7, b"payload").unwrap();
 
-        assert_eq!(store.read(&stream(), 140, 7).unwrap(), b"payload");
+        assert_eq!(store.read(stream(), 140, 7).unwrap(), b"payload");
     }
 
     #[test]
     fn concat_joins_in_order_across_directories() {
         let dir = tempfile::tempdir().unwrap();
         let store = FragmentStore::new(dir.path());
-        store.write(&stream(), 140, 9_999, b"a").unwrap();
-        store.write(&stream(), 140, 10_000, b"b").unwrap();
-        store.write(&stream(), 140, 10_001, b"c").unwrap();
+        store.write(stream(), 140, 9_999, b"a").unwrap();
+        store.write(stream(), 140, 10_000, b"b").unwrap();
+        store.write(stream(), 140, 10_001, b"c").unwrap();
         let output = dir.path().join("out");
 
-        store
-            .concat(&stream(), 140, 9_999, 10_001, &output)
-            .unwrap();
+        store.concat(stream(), 140, 9_999, 10_001, &output).unwrap();
 
         assert_eq!(fs::read(output).unwrap(), b"abc");
     }
@@ -197,25 +302,25 @@ mod tests {
             for _ in 0..8 {
                 scope.spawn(|| {
                     for _ in 0..20 {
-                        store.write(&stream(), 140, 7, &payload).unwrap();
+                        store.write(stream(), 140, 7, &payload).unwrap();
                     }
                 });
             }
         });
 
-        assert_eq!(store.read(&stream(), 140, 7).unwrap(), payload);
+        assert_eq!(store.read(stream(), 140, 7).unwrap(), payload);
     }
 
     #[test]
     fn concat_keeps_the_extension_of_a_neighbouring_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = FragmentStore::new(dir.path());
-        store.write(&stream(), 140, 1, b"a").unwrap();
+        store.write(stream(), 140, 1, b"a").unwrap();
         let neighbour = dir.path().join("out.part");
         fs::write(&neighbour, b"keep").unwrap();
 
         store
-            .concat(&stream(), 140, 1, 1, &dir.path().join("out.mp4"))
+            .concat(stream(), 140, 1, 1, &dir.path().join("out.mp4"))
             .unwrap();
 
         assert_eq!(fs::read(neighbour).unwrap(), b"keep");
@@ -227,7 +332,7 @@ mod tests {
         let store = FragmentStore::new(dir.path());
         let output = dir.path().join("out");
 
-        store.concat(&stream(), 140, 1, 1, &output).unwrap_err();
+        store.concat(stream(), 140, 1, 1, &output).unwrap_err();
 
         assert_eq!(
             fs::read_dir(dir.path()).unwrap().count(),
@@ -240,10 +345,10 @@ mod tests {
     fn concat_with_a_missing_fragment_leaves_no_output() {
         let dir = tempfile::tempdir().unwrap();
         let store = FragmentStore::new(dir.path());
-        store.write(&stream(), 140, 1, b"a").unwrap();
+        store.write(stream(), 140, 1, b"a").unwrap();
         let output = dir.path().join("out");
 
-        let error = store.concat(&stream(), 140, 1, 2, &output).unwrap_err();
+        let error = store.concat(stream(), 140, 1, 2, &output).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         assert!(!output.exists());

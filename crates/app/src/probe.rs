@@ -3,7 +3,7 @@
 use crate::error::AcquireError;
 use crate::family::{SharedFamily, SwitchReason, Transition};
 use crate::session::Clock;
-use dalsegno_core::container::parse_mp4_fragment;
+use dalsegno_core::container::{parse_mp4_fragment, read_timing};
 pub use dalsegno_core::format::FormatInfo;
 
 use dalsegno_core::format::{choose_audio, video_candidates};
@@ -260,6 +260,7 @@ fn check_audio_pair(first: &[u8], second: &[u8]) -> Result<f64, String> {
 
 /// Checks keyframe-first, concatenation and mp4 compatibility on two adjacent fragments.
 async fn check_video_pair(tools: &ProbeTools, first: &[u8], second: &[u8]) -> Result<(), String> {
+    read_timing(first).map_err(|error| format!("timing unreadable: {error}"))?;
     let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
     let path = |name: &str| directory.path().join(name);
     let write =

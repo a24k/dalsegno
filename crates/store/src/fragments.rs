@@ -99,6 +99,26 @@ impl Database {
         Ok(bounds.0.zip(bounds.1).map(|(a, b)| (a as u64, b as u64)))
     }
 
+    /// Removes a row whose file is gone. Features stay, as they do not need the file.
+    pub fn delete_fragment(&self, stream_id: i64, itag: u32, sq: u64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "DELETE FROM fragments WHERE stream_id = ?1 AND itag = ?2 AND sq = ?3",
+            params![stream_id, itag, sq as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Returns each stream and format that has fragments.
+    pub fn fragment_tracks(&self) -> Result<Vec<(i64, u32)>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT DISTINCT stream_id, itag FROM fragments")?;
+        let tracks = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(tracks)
+    }
+
     /// Stores a head sample unless one for the same instant exists.
     pub fn put_head_sample(&self, sample: &HeadSample) -> Result<(), StoreError> {
         self.connection.execute(
@@ -195,6 +215,20 @@ pub(crate) mod tests {
         database.put_fragment(&fragment(id, 140, 5)).unwrap();
 
         assert_eq!(database.fragment_bounds(id, 140).unwrap(), Some((5, 9)));
+    }
+
+    #[test]
+    fn deleting_a_row_leaves_the_track_when_others_remain() {
+        let database = Database::open_in_memory().unwrap();
+        let id = stream(&database);
+        database.put_fragment(&fragment(id, 140, 5)).unwrap();
+        database.put_fragment(&fragment(id, 140, 6)).unwrap();
+        database.put_fragment(&fragment(id, 248, 6)).unwrap();
+
+        database.delete_fragment(id, 248, 6).unwrap();
+        database.delete_fragment(id, 140, 5).unwrap();
+
+        assert_eq!(database.fragment_tracks().unwrap(), [(id, 140)]);
     }
 
     #[test]

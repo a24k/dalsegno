@@ -3,7 +3,7 @@
 use dalsegno_app::error::AcquireError;
 use dalsegno_app::family::{FamilyController, SharedFamily};
 use dalsegno_app::fetch::{
-    FetchLimits, FetchRange, FetchReport, Fetcher, RetryPolicy, fetch_range,
+    FetchLimits, FetchRange, FetchReport, Fetcher, Ledger, RetryPolicy, SharedDatabase, fetch_range,
 };
 use dalsegno_app::session::{Clock, Session};
 use dalsegno_core::redact::Redacted;
@@ -11,6 +11,9 @@ use dalsegno_core::stream::{IpFamily, IpPolicy, VideoId};
 use dalsegno_io::fragments::FragmentStore;
 use dalsegno_io::http::{BindAddresses, FragmentClient};
 use dalsegno_io::ytdlp::{ResolveError, Resolver, StreamInfo};
+use dalsegno_store::database::Database;
+use dalsegno_store::fragments::{FragmentRow, HeadSample};
+use dalsegno_store::streams::NewStream;
 use std::collections::VecDeque;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
@@ -72,6 +75,8 @@ struct Harness {
     family: SharedFamily,
     now: Arc<AtomicU64>,
     data: TempDir,
+    database: SharedDatabase,
+    stream_id: i64,
 }
 
 impl Harness {
@@ -83,7 +88,23 @@ impl Harness {
             calls: AtomicU64::new(0),
             errors: Mutex::new(VecDeque::new()),
         });
+        let database = Database::open_in_memory().unwrap();
+        let stream_id = database
+            .insert_stream(&NewStream {
+                video_id: Self::video().to_string(),
+                title: "Example TV".to_string(),
+                channel_id: None,
+                channel_name: None,
+                thumbnail_url: None,
+                video_itag: None,
+                audio_itag: ITAG,
+                fragment_len: 5.0,
+                registered_at: 0,
+            })
+            .unwrap();
         Self {
+            database: Arc::new(Mutex::new(database)),
+            stream_id,
             server,
             resolver,
             family: FamilyController::new(policy, true).shared(),
@@ -106,6 +127,13 @@ impl Harness {
         let now = Arc::clone(&self.now);
         let clock: Clock = Arc::new(move || now.load(Ordering::SeqCst));
         Fetcher {
+            ledger: Ledger {
+                database: Arc::clone(&self.database),
+                stream_id: self.stream_id,
+                itag: ITAG,
+                fragment_len: 5.0,
+            },
+            clock: Arc::clone(&clock),
             session: Session::new(
                 Arc::clone(&self.resolver),
                 Self::video(),
@@ -144,16 +172,37 @@ impl Harness {
         last: u64,
     ) -> Result<FetchReport, AcquireError> {
         let range = FetchRange {
-            video: Self::video(),
+            stream_id: self.stream_id,
             itag: ITAG,
             first,
             last,
         };
-        fetch_range(self.fetcher(limits), range).await
+        fetch_range(Arc::new(self.fetcher(limits)), range).await
     }
 
     fn stored(&self, sq: u64) -> Vec<u8> {
-        self.store().read(&Self::video(), ITAG, sq).unwrap()
+        self.store().read(self.stream_id, ITAG, sq).unwrap()
+    }
+
+    fn add_row(&self, sq: u64) {
+        let row = FragmentRow {
+            stream_id: self.stream_id,
+            itag: ITAG,
+            sq,
+            stream_time: 0.0,
+            duration: 5.0,
+            size: 1,
+            fetched_at: 0,
+        };
+        self.database.lock().unwrap().put_fragment(&row).unwrap();
+    }
+
+    fn rows(&self, first: u64, last: u64) -> Vec<FragmentRow> {
+        self.database
+            .lock()
+            .unwrap()
+            .fragments_in_range(self.stream_id, ITAG, first, last)
+            .unwrap()
     }
 
     async fn active_family(&self) -> IpFamily {
@@ -161,8 +210,18 @@ impl Harness {
     }
 }
 
+/// A minimal WebM fragment whose Cluster Timecode is `sq` seconds, followed by padding.
+fn fragment_bytes(sq: u64) -> Vec<u8> {
+    const EBML_HEADER: [u8; 5] = [0x1A, 0x45, 0xDF, 0xA3, 0x80];
+    const CLUSTER: [u8; 12] = [
+        0x1F, 0x43, 0xB6, 0x75, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    ];
+    let timecode = (sq * 1_000).to_be_bytes();
+    [&EBML_HEADER[..], &CLUSTER, &[0xE7, 0x88], &timecode].concat()
+}
+
 fn body(sq: u64) -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_bytes(format!("fragment-{sq};").into_bytes())
+    ResponseTemplate::new(200).set_body_bytes(fragment_bytes(sq))
 }
 
 async fn serve_fragment(server: &MockServer, sq: u64) {
@@ -207,10 +266,10 @@ async fn fetches_a_range_and_joins_the_bytes_in_order() {
     let output = harness.data.path().join("joined");
     harness
         .store()
-        .concat(&Harness::video(), ITAG, 10, 19, &output)
+        .concat(harness.stream_id, ITAG, 10, 19, &output)
         .unwrap();
-    let expected: String = (10..=19).map(|sq| format!("fragment-{sq};")).collect();
-    assert_eq!(fs::read(output).unwrap(), expected.into_bytes());
+    let expected: Vec<u8> = (10..=19).flat_map(fragment_bytes).collect();
+    assert_eq!(fs::read(output).unwrap(), expected);
     assert_eq!(harness.resolver.calls(), 1);
 }
 
@@ -312,7 +371,7 @@ async fn service_unavailable_is_retried() {
     let report = harness.fetch(5, 5).await.unwrap();
 
     assert_eq!(report, complete(1));
-    assert_eq!(harness.stored(5), b"fragment-5;");
+    assert_eq!(harness.stored(5), fragment_bytes(5));
 }
 
 #[tokio::test]
@@ -351,7 +410,7 @@ async fn empty_200_is_retried_and_never_stored() {
     let report = harness.fetch(5, 5).await.unwrap();
 
     assert_eq!(report, complete(1));
-    assert_eq!(harness.stored(5), b"fragment-5;");
+    assert_eq!(harness.stored(5), fragment_bytes(5));
 }
 
 #[tokio::test]
@@ -431,10 +490,7 @@ async fn short_lived_url_is_not_resolved_for_every_request() {
 #[tokio::test]
 async fn stored_fragments_are_not_requested_again() {
     let harness = Harness::new(IpPolicy::V4Only).await;
-    harness
-        .store()
-        .write(&Harness::video(), ITAG, 6, b"kept")
-        .unwrap();
+    harness.add_row(6);
     Mock::given(query_param("sq", "6"))
         .respond_with(ResponseTemplate::new(500))
         .expect(0)
@@ -453,7 +509,6 @@ async fn stored_fragments_are_not_requested_again() {
             ..FetchReport::default()
         }
     );
-    assert_eq!(harness.stored(6), b"kept");
 }
 
 #[tokio::test]
@@ -650,6 +705,75 @@ async fn one_refused_fragment_cannot_keep_resolving_while_others_succeed() {
 }
 
 #[tokio::test]
+async fn timing_comes_from_the_fragment_bytes() {
+    let harness = Harness::new(IpPolicy::V4Only).await;
+    serve_fragment(&harness.server, 7).await;
+
+    harness.fetch(7, 7).await.unwrap();
+
+    assert_eq!(
+        harness.rows(7, 7),
+        [FragmentRow {
+            stream_id: harness.stream_id,
+            itag: ITAG,
+            sq: 7,
+            stream_time: 7.0,
+            duration: 5.0,
+            size: fragment_bytes(7).len() as u64,
+            fetched_at: START as i64 * 1_000,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn a_200_that_is_not_a_fragment_is_retried_and_never_stored() {
+    let harness = Harness::new(IpPolicy::V4Only).await;
+    Mock::given(query_param("sq", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"<html>".to_vec()))
+        .up_to_n_times(1)
+        .mount(&harness.server)
+        .await;
+    serve_fragment(&harness.server, 5).await;
+
+    assert_eq!(harness.fetch(5, 5).await.unwrap(), complete(1));
+    assert_eq!(harness.stored(5), fragment_bytes(5));
+}
+
+#[tokio::test]
+async fn head_samples_are_taken_at_most_once_a_minute() {
+    let harness = Harness::new(IpPolicy::V4Only).await;
+    for (sq, walltime) in [(1, 1_000_000), (2, 1_030_000), (3, 1_060_000)] {
+        Mock::given(query_param("sq", sq.to_string()))
+            .respond_with(
+                body(sq)
+                    .insert_header("X-Head-Seqnum", "100")
+                    .insert_header("X-Head-Time-Millis", "500250")
+                    .insert_header("X-Walltime-Ms", walltime.to_string()),
+            )
+            .mount(&harness.server)
+            .await;
+    }
+
+    harness.fetch(1, 3).await.unwrap();
+
+    let database = harness.database.lock().unwrap();
+    assert_eq!(
+        database.latest_head_sample(harness.stream_id).unwrap(),
+        Some(HeadSample {
+            stream_id: harness.stream_id,
+            observed_at: 1_060_000,
+            head_sq: 100,
+            head_time: 500.25,
+        })
+    );
+    let samples: i64 = database
+        .connection()
+        .query_row("SELECT COUNT(*) FROM head_samples", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(samples, 2);
+}
+
+#[tokio::test]
 async fn ranges_longer_than_the_dvr_are_rejected() {
     let harness = Harness::new(IpPolicy::V4Only).await;
 
@@ -674,4 +798,151 @@ async fn errors_never_mention_the_url() {
     let shown = format!("{error} {error:?}");
     assert!(!shown.contains("videoplayback"), "{shown}");
     assert!(!format!("{:?}", harness.fetcher(FetchLimits::default())).contains("videoplayback"));
+}
+
+mod backfill {
+    use super::*;
+    use dalsegno_app::backfill::backfill;
+
+    const HEAD: u64 = 100;
+    /// Three 5-second fragments, so the window is `sq` 97 to 99.
+    const HOURS: f64 = 15.0 / 3600.0;
+
+    async fn harness() -> Harness {
+        let harness = Harness::new(IpPolicy::V4Only).await;
+        Mock::given(query_param("sq", "1"))
+            .respond_with(ResponseTemplate::new(404).insert_header("X-Head-Seqnum", "100"))
+            .mount(&harness.server)
+            .await;
+        harness
+    }
+
+    async fn run(
+        harness: &Harness,
+        hours: f64,
+    ) -> Result<dalsegno_app::backfill::BackfillReport, AcquireError> {
+        let limits = FetchLimits {
+            concurrency: 1,
+            requests_per_second: 10_000.0,
+        };
+        backfill(Arc::new(harness.fetcher(limits)), 5.0, hours).await
+    }
+
+    fn open_gaps(harness: &Harness) -> Vec<(u64, u64)> {
+        harness
+            .database
+            .lock()
+            .unwrap()
+            .open_gaps(harness.stream_id, ITAG)
+            .unwrap()
+            .iter()
+            .map(|gap| (gap.sq_first, gap.sq_last))
+            .collect()
+    }
+
+    fn gap_statuses(harness: &Harness) -> Vec<(u64, u64, String)> {
+        let database = harness.database.lock().unwrap();
+        let mut statement = database
+            .connection()
+            .prepare("SELECT sq_first, sq_last, status FROM gaps ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u64,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn fills_the_window_behind_the_head() {
+        let harness = harness().await;
+        for sq in 97..=99 {
+            serve_fragment(&harness.server, sq).await;
+        }
+
+        let report = run(&harness, HOURS).await.unwrap();
+
+        assert_eq!((report.head_sq, report.fetched), (HEAD, 3));
+        assert_eq!(harness.rows(97, 99).len(), 3);
+        assert_eq!(gap_statuses(&harness), [(97, 99, "filled".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn only_missing_fragments_become_gaps() {
+        let harness = harness().await;
+        harness.add_row(98);
+        serve_fragment(&harness.server, 97).await;
+        serve_fragment(&harness.server, 99).await;
+
+        let report = run(&harness, HOURS).await.unwrap();
+
+        assert_eq!(report.fetched, 2);
+        assert_eq!(
+            gap_statuses(&harness),
+            [
+                (97, 97, "filled".to_string()),
+                (99, 99, "filled".to_string())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fragments_gone_from_the_dvr_are_recorded_and_not_requested_again() {
+        let harness = harness().await;
+        Mock::given(query_param("sq", "97"))
+            .respond_with(ResponseTemplate::new(404).insert_header("X-Head-Seqnum", "100"))
+            .expect(1)
+            .mount(&harness.server)
+            .await;
+        serve_fragment(&harness.server, 98).await;
+        serve_fragment(&harness.server, 99).await;
+
+        let report = run(&harness, HOURS).await.unwrap();
+        let again = run(&harness, HOURS).await.unwrap();
+
+        assert_eq!((report.fetched, report.lost), (2, 1));
+        assert_eq!((again.fetched, again.lost), (0, 0));
+        assert!(gap_statuses(&harness).contains(&(97, 97, "lost".to_string())));
+        assert_eq!(open_gaps(&harness), []);
+    }
+
+    #[tokio::test]
+    async fn fragments_that_keep_failing_stay_open_for_the_next_run() {
+        let harness = harness().await;
+        Mock::given(query_param("sq", "98"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(4)
+            .mount(&harness.server)
+            .await;
+        for sq in 97..=99 {
+            serve_fragment(&harness.server, sq).await;
+        }
+
+        let first = run(&harness, HOURS).await.unwrap();
+        assert_eq!((first.fetched, first.failed), (2, 1));
+        assert_eq!(open_gaps(&harness), [(98, 98)]);
+
+        let second = run(&harness, HOURS).await.unwrap();
+        assert_eq!((second.fetched, second.failed), (1, 0));
+        assert_eq!(open_gaps(&harness), []);
+    }
+
+    #[tokio::test]
+    async fn an_unreasonable_window_is_rejected() {
+        let harness = harness().await;
+
+        for hours in [0.0, -1.0, 121.0, f64::NAN] {
+            assert!(matches!(
+                run(&harness, hours).await,
+                Err(AcquireError::InvalidRequest(_))
+            ));
+        }
+        assert_eq!(harness.resolver.calls(), 0);
+    }
 }

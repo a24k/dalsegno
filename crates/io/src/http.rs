@@ -50,6 +50,10 @@ pub struct FragmentResponse {
     pub head_seqnum: Option<u64>,
     /// `X-Sequence-Num`.
     pub sequence_num: Option<u64>,
+    /// `X-Head-Time-Millis`, the stream time of the head.
+    pub head_time_ms: Option<u64>,
+    /// `X-Walltime-Ms`, the server's clock at the time of the response.
+    pub walltime_ms: Option<u64>,
     /// Response body.
     pub body: Vec<u8>,
 }
@@ -103,6 +107,8 @@ impl FragmentClient {
         let status = response.status().as_u16();
         let head_seqnum = number_header(response.headers(), "x-head-seqnum");
         let sequence_num = number_header(response.headers(), "x-sequence-num");
+        let head_time_ms = number_header(response.headers(), "x-head-time-millis");
+        let walltime_ms = number_header(response.headers(), "x-walltime-ms");
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await? {
             if body.len() + chunk.len() > MAX_BODY_BYTES {
@@ -114,6 +120,8 @@ impl FragmentClient {
             status,
             head_seqnum,
             sequence_num,
+            head_time_ms,
+            walltime_ms,
             body,
         })
     }
@@ -186,6 +194,8 @@ mod tests {
                 ResponseTemplate::new(200)
                     .insert_header("X-Head-Seqnum", "99")
                     .insert_header("X-Sequence-Num", "7")
+                    .insert_header("X-Head-Time-Millis", "12345678")
+                    .insert_header("X-Walltime-Ms", "1700000000000")
                     .set_body_bytes(b"fragment".to_vec()),
             )
             .mount(&server)
@@ -199,6 +209,8 @@ mod tests {
                 status: 200,
                 head_seqnum: Some(99),
                 sequence_num: Some(7),
+                head_time_ms: Some(12_345_678),
+                walltime_ms: Some(1_700_000_000_000),
                 body: b"fragment".to_vec(),
             }
         );
