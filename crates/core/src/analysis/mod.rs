@@ -9,7 +9,7 @@ mod synthetic;
 mod tracking;
 
 pub use diff::{
-    Diff, DiffConfig, KnownClip, Region, RegionClass, SelfCheck, VersionCycle, compare,
+    Diff, DiffConfig, KnownClip, Region, RegionClass, SelfCheck, VersionCycle, compare, locate_clip,
 };
 pub use ncc::{Correlator, Match, search};
 pub use period::{PeriodConfig, PeriodEstimate, estimate_period};

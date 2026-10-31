@@ -134,7 +134,7 @@ fn reference_peaks(
 }
 
 /// Yields the best offset of each stretch of scores above the threshold.
-fn clusters(scores: &[f32], threshold: f32) -> impl Iterator<Item = usize> + '_ {
+pub(super) fn clusters(scores: &[f32], threshold: f32) -> impl Iterator<Item = usize> + '_ {
     let mut offset = 0;
     std::iter::from_fn(move || {
         while offset < scores.len() && scores[offset] < threshold {

@@ -3,6 +3,7 @@
 use super::ncc::{Correlator, MIN_REFERENCE_DEVIATION, Match, search};
 use super::series::Prepared;
 use rayon::prelude::*;
+use serde::Serialize;
 use std::ops::Range;
 
 const THREE_HOURS: f64 = 3.0 * 3600.0;
@@ -53,7 +54,8 @@ pub struct TrackPoint {
 }
 
 /// What a stretch of points means.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunKind {
     /// A steady lag.
     Lag,
@@ -66,7 +68,7 @@ pub enum RunKind {
 }
 
 /// A stretch of consecutive points that mean the same thing.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct LagRun {
     /// Stream time of the first point.
     pub start: f64,
@@ -81,7 +83,8 @@ pub struct LagRun {
 }
 
 /// A reason to think the playlist changed.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Signal {
     /// The lag settled at the period plus `delta`.
     LagShift {

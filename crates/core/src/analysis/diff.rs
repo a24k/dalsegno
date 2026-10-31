@@ -3,8 +3,10 @@
 //! The baseline. Milestone 7 replaces it behind this interface.
 
 use super::ncc::{Correlator, MIN_REFERENCE_DEVIATION};
+use super::period::clusters;
 use super::series::Prepared;
 use rayon::prelude::*;
+use serde::Serialize;
 
 /// Comparison parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -24,6 +26,8 @@ pub struct DiffConfig {
     pub check_tolerance: f64,
     /// A stretch of the old cycle shorter than this is not reported as deleted, in seconds.
     pub min_deleted_seconds: f64,
+    /// How far one moved edge can be off, in seconds. Lengths inherit this per edge.
+    pub edge_tolerance: f64,
     /// Window for moving a region's edges, in seconds.
     pub edge_window: f64,
     /// Score that keeps an edge moving.
@@ -42,6 +46,7 @@ impl Default for DiffConfig {
             min_windows: 10,
             check_tolerance: 5.0,
             min_deleted_seconds: 60.0,
+            edge_tolerance: 3.0,
             edge_window: 5.0,
             edge_threshold: 0.8,
             min_region_seconds: 20.0,
@@ -63,7 +68,7 @@ pub struct VersionCycle<'a> {
 }
 
 /// A registered recurring clip (FR-N7).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct KnownClip {
     /// Where the clip occurs in the current cycle, in stream time.
     pub start: f64,
@@ -72,7 +77,8 @@ pub struct KnownClip {
 }
 
 /// What a region of the cycle is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RegionClass {
     /// In the previous version.
     Existing,
@@ -87,7 +93,7 @@ pub enum RegionClass {
 }
 
 /// One stretch of the comparison.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Region {
     /// What it is.
     pub class: RegionClass,
@@ -107,7 +113,7 @@ pub struct Region {
 }
 
 /// One automatic check of the result.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SelfCheck {
     /// What was checked.
     pub name: String,
@@ -122,7 +128,7 @@ pub struct SelfCheck {
 }
 
 /// The result of a comparison.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Diff {
     /// Regions in time order, then deleted ones.
     pub regions: Vec<Region>,
@@ -176,25 +182,28 @@ pub fn compare(
     let deleted = deleted_regions(&regions, versions, config);
     let inserted: f64 = regions
         .iter()
-        .filter(|region| region.class != RegionClass::Existing || region.moved)
+        .filter(|region| is_inserted(region))
         .map(|region| region.end - region.start)
         .sum();
     let removed: f64 = deleted.iter().map(|region| region.end - region.start).sum();
     let change = versions
         .first()
         .map_or(0.0, |previous| period - previous.period);
+    let edges = 2 * (regions.iter().filter(|region| is_inserted(region)).count() + deleted.len());
     let checks = vec![
         check(
             "shift changes sum to the period change",
             change,
             shift_changes.iter().sum(),
-            config,
+            config.check_tolerance,
         ),
         check(
             "inserted minus deleted equals the period change",
             change,
             inserted - removed,
-            config,
+            config
+                .check_tolerance
+                .max(edges as f64 * config.edge_tolerance),
         ),
     ];
     regions.extend(deleted);
@@ -205,13 +214,50 @@ pub fn compare(
     }
 }
 
-fn check(name: &str, expected: f64, actual: f64, config: &DiffConfig) -> SelfCheck {
+/// Finds each place a recurring clip plays within `range` of `current`.
+pub fn locate_clip(
+    current: &Prepared,
+    clip: &Prepared,
+    range: std::ops::Range<f64>,
+    threshold: f32,
+) -> Vec<KnownClip> {
+    let length = clip.len();
+    let bounds = (
+        current.index_of(range.start),
+        current.index_of(range.end),
+        current.len().checked_sub(length),
+    );
+    let (Some(first), Some(end), Some(limit)) = bounds else {
+        return Vec::new();
+    };
+    let last = end.min(limit);
+    if first > last {
+        return Vec::new();
+    }
+    let mut correlator = Correlator::default();
+    let scores = cross_scores(&mut correlator, clip, 0, length, current, first..last + 1);
+    clusters(&scores, threshold)
+        .map(|offset| {
+            let start = current.time_of(first + offset);
+            KnownClip {
+                start,
+                end: start + length as f64 / current.rate,
+            }
+        })
+        .collect()
+}
+
+fn is_inserted(region: &Region) -> bool {
+    region.class != RegionClass::Existing || region.moved
+}
+
+fn check(name: &str, expected: f64, actual: f64, tolerance: f64) -> SelfCheck {
     SelfCheck {
         name: name.to_string(),
         expected,
         actual,
-        tolerance: config.check_tolerance,
-        passed: (expected - actual).abs() <= config.check_tolerance,
+        tolerance,
+        passed: (expected - actual).abs() <= tolerance,
     }
 }
 
@@ -475,7 +521,11 @@ impl EdgeComparison<'_> {
         const STEP: f64 = 1.0;
         let window = self.config.edge_window;
         let limit = end + self.config.window;
-        let mut time = end - window;
+        // A match can run past the true edge, so the walk starts well inside the region.
+        let mut time = end - self.config.window - window;
+        if !self.agrees_at(time) {
+            return end;
+        }
         while time + window + STEP <= limit && self.agrees_at(time + STEP) {
             time += STEP;
         }
@@ -485,7 +535,10 @@ impl EdgeComparison<'_> {
     fn move_start(&self, start: f64) -> f64 {
         const STEP: f64 = 1.0;
         let limit = start - self.config.window;
-        let mut time = start;
+        let mut time = start + self.config.window;
+        if !self.agrees_at(time) {
+            return start;
+        }
         while time - STEP >= limit && self.agrees_at(time - STEP) {
             time -= STEP;
         }
@@ -725,6 +778,23 @@ mod tests {
     }
 
     #[test]
+    fn edges_land_near_the_truth_from_either_side() {
+        let old = content(40, P);
+        let insert = content(41, 400.0);
+
+        for at in [10_000, 10_123, 10_257, 10_300] {
+            let new = [&old[..at], &insert, &old[at..]].concat();
+
+            let diff = compare_cycles(&old, &new);
+
+            let added = region(&diff, RegionClass::New);
+            let truth = at as f64 / 10.0;
+            assert!((added.start - truth).abs() <= 3.0, "{at}: {added:?}");
+            assert!((added.end - truth - 400.0).abs() <= 3.0, "{at}: {added:?}");
+        }
+    }
+
+    #[test]
     fn a_replacement_reports_what_was_deleted() {
         let old = content(4, P);
         let insert = content(5, 900.0);
@@ -878,6 +948,33 @@ mod tests {
         let diff = compare(&current, 0.0, 500.0, &[], &[], &DiffConfig::default());
 
         assert_eq!(classes(&diff), [RegionClass::New]);
+    }
+
+    #[test]
+    fn a_clip_is_located_at_each_place_it_plays() {
+        let clip = content(30, 211.0);
+        let parts = [
+            content(31, 500.0),
+            clip.clone(),
+            content(32, 300.0),
+            clip.clone(),
+            content(33, 100.0),
+        ];
+        let current = prepared(&parts.concat());
+
+        let found = locate_clip(&current, &prepared(&clip), 0.0..1322.0, 0.8);
+
+        let starts: Vec<f64> = found.iter().map(|clip| clip.start).collect();
+        assert_eq!(starts, [500.0, 1011.0]);
+        assert_eq!(found[0].end, 711.0);
+    }
+
+    #[test]
+    fn a_clip_longer_than_the_series_is_not_found() {
+        let current = prepared(&content(34, 10.0));
+        let clip = prepared(&content(35, 20.0));
+
+        assert_eq!(locate_clip(&current, &clip, 0.0..10.0, 0.8), []);
     }
 
     #[test]
