@@ -43,18 +43,20 @@ container reader, format detection, `doctor`.
 Migrations, repositories, fragment store, feature runs, envelope, head samples, gaps,
 retention holds and sweep.
 
-**Exit:** envelope agrees with `env.npy` to the S4 criterion. Incremental equals batch.
+**Exit:** envelope passes the S4 compatibility check against `env.npy`. Incremental equals
+batch.
 
 ## M3 Analysis
 
 NCC, `Series`, period, tracking, change signals, baseline diff, self-checks, manual known
 material, offline CLI.
 
-**Exit:** the known answers are reproduced, plus synthetic cases for shrinkage (D-01),
-harmonics (D-02), song-length net-zero replacement (D-04) and recording gaps (D-05). Unit
-tests use synthetic signals, a random series repeating at a known period and the same series
-with a section inserted, and period estimation, lag tracking and version comparison must
-return the known values.
+**Exit:** the known answers are reproduced from the in-process envelope, which is what shows it
+is good enough for analysis. Reproducing them from a Python `.npy` alone does not meet this
+exit. Synthetic cases also pass for shrinkage (D-01), harmonics (D-02), song-length net-zero
+replacement (D-04) and recording gaps (D-05). Unit tests use synthetic signals, a random series
+repeating at a known period and the same series with a section inserted, and period
+estimation, lag tracking and version comparison must return the known values.
 
 ## M4 Cutting from the CLI
 

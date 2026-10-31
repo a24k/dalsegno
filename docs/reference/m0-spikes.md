@@ -51,20 +51,29 @@ Each audio fragment holds `ftyp`, `moov`, `emsg`, `moof` and `mdat`. Audio is AA
 
 ## S4 Envelope
 
-Against the Python envelope over 35,998 bins:
+The Python envelope is the reference because the known answers came from it, not because it is
+more accurate. Resampling has no single correct output, so these figures measure agreement with
+the existing pipeline, not quality.
 
-| Pipeline | Correlation | Mean abs error | p99 | Max |
+Difference from the Python envelope over 35,998 bins:
+
+| Pipeline | Correlation | Mean abs difference | p99 | Max |
 | --- | --- | --- | --- | --- |
 | ffmpeg with the Python recipe | 1.000000 | 0.00000 | 0.00000 | 0.00000 |
 | In process, continuous decoding | 0.999999 | 0.00029 | 0.00297 | 0.11143 |
 | In process, reset per fragment | 0.999980 | 0.00150 | 0.05099 | 0.32391 |
 
 The in-process path used a 16-zero-crossing Blackman-windowed sinc at 0.97 of Nyquist. Decoded
-PCM is equivalent, so the remaining difference comes from the resampler. Exact equality would
-mean reimplementing ffmpeg's resampler, which brings no analysis benefit.
+PCM is equivalent, so the remaining difference comes from the resampler. We do not reimplement
+ffmpeg's resampler to remove it. The difference is expected to matter little, but its effect on
+analysis is unmeasured: no analysis has run on this envelope, and the largest difference was
+not investigated.
 
-**Acceptance for milestone 2:** correlation of at least 0.9999, mean absolute error of at most
-0.001 and p99 of at most 0.005 against the Python envelope.
+**Compatibility check for milestone 2:** correlation of at least 0.9999, mean absolute difference
+of at most 0.001 and p99 of at most 0.005 against the Python envelope. These thresholds are the
+measured figures plus a margin, so they catch a broken pipeline or a regression. They are not
+derived from what analysis needs. Milestone 3 decides whether the envelope is good enough, by
+reproducing the known answers from it.
 
 The Python envelope and the first decoded sample lined up at offset 0 on this data, because the
 fixture starts at a fragment boundary.
