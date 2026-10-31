@@ -3,6 +3,7 @@
 pub mod acquisition;
 pub mod analysis;
 pub mod container;
+pub mod export;
 pub mod features;
 pub mod format;
 pub mod redact;
