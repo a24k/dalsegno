@@ -31,12 +31,13 @@ impl Mp4Fragment<'_> {
 
 /// Parses a fragment that carries its own `moov`, followed by one `moof` and its `mdat`.
 pub fn parse_mp4_fragment(data: &[u8]) -> Result<Mp4Fragment<'_>, ContainerError> {
-    let (moov, moof, moof_start) = top_level_boxes(data)?;
-    let track = parse_moov(moov)?;
-    let run = parse_moof(moof, track.default_duration)?;
-    let base = i64::try_from(moof_start).map_err(|_| ContainerError::Truncated("moof"))?;
-    let first = base + i64::from(run.data_offset);
-    let packets = slice_packets(data, first, &run.sizes)?;
+    let layout = top_level_boxes(data)?;
+    let track = parse_moov(layout.moov)?;
+    let run = parse_moof(layout.moof, track.default_duration)?;
+    let end_ticks = run.start_ticks.checked_add(run.duration_ticks);
+    end_ticks.ok_or(ContainerError::Unsupported("decode time"))?;
+    let first = layout.first_packet_offset(run.data_offset)?;
+    let packets = slice_packets(layout.mdat, first, &run.sizes)?;
     Ok(Mp4Fragment {
         start_ticks: run.start_ticks,
         duration_ticks: run.duration_ticks,
@@ -68,6 +69,7 @@ struct Mp4Box<'a> {
     name: [u8; 4],
     payload: &'a [u8],
     start: usize,
+    payload_start: usize,
 }
 
 /// Iterates over sibling boxes, yielding an error once for a malformed header.
@@ -110,6 +112,7 @@ impl<'a> Boxes<'a> {
                 name,
                 payload,
                 start,
+                payload_start: start + header,
             },
             end,
         ))
@@ -172,23 +175,50 @@ fn be_u64(data: &[u8], offset: usize, label: &'static str) -> Result<u64, Contai
         .ok_or(ContainerError::Truncated(label))
 }
 
-fn top_level_boxes(data: &[u8]) -> Result<(&[u8], &[u8], usize), ContainerError> {
+/// The top-level boxes of a fragment, with what is needed to locate its samples.
+struct Layout<'a> {
+    moov: &'a [u8],
+    moof: &'a [u8],
+    moof_start: usize,
+    mdat: &'a [u8],
+    mdat_start: usize,
+}
+
+impl Layout<'_> {
+    /// Converts a `trun` data offset, relative to the `moof`, into one relative to the `mdat`.
+    fn first_packet_offset(&self, data_offset: i32) -> Result<usize, ContainerError> {
+        let outside = |_| ContainerError::Truncated("mdat");
+        let moof_start = i64::try_from(self.moof_start).map_err(outside)?;
+        let mdat_start = i64::try_from(self.mdat_start).map_err(outside)?;
+        usize::try_from(moof_start + i64::from(data_offset) - mdat_start).map_err(outside)
+    }
+}
+
+fn top_level_boxes(data: &[u8]) -> Result<Layout<'_>, ContainerError> {
     let mut moov = None;
+    let mut moof = None;
     for found in boxes(data) {
         let found = found?;
-        match &found.name {
-            b"moov" => moov = Some(found.payload),
-            b"moof" => {
-                let moov = moov.ok_or(ContainerError::Missing("moov"))?;
-                return Ok((moov, found.payload, found.start));
+        match (&found.name, moov, moof) {
+            (b"moov", _, _) => moov = Some(found.payload),
+            (b"moof", Some(_), None) => moof = Some((found.payload, found.start)),
+            (b"moof", None, _) => return Err(ContainerError::Missing("moov")),
+            (b"mdat", Some(moov), Some((moof, moof_start))) => {
+                return Ok(Layout {
+                    moov,
+                    moof,
+                    moof_start,
+                    mdat: found.payload,
+                    mdat_start: found.payload_start,
+                });
             }
             _ => {}
         }
     }
-    Err(ContainerError::Missing(if moov.is_some() {
-        "moof"
-    } else {
-        "moov"
+    Err(ContainerError::Missing(match (moov, moof) {
+        (None, _) => "moov",
+        (_, None) => "moof",
+        _ => "mdat",
     }))
 }
 
@@ -430,20 +460,19 @@ fn parse_trun(
 }
 
 fn slice_packets<'a>(
-    data: &'a [u8],
-    first: i64,
+    mdat: &'a [u8],
+    first: usize,
     sizes: &[u32],
 ) -> Result<Vec<&'a [u8]>, ContainerError> {
-    let start = usize::try_from(first).map_err(|_| ContainerError::Truncated("mdat"))?;
     sizes
         .iter()
-        .scan(start, |offset, size| {
+        .scan(first, |offset, size| {
             let begin = *offset;
             *offset = begin.saturating_add(*size as usize);
             Some((begin, *offset))
         })
         .map(|(begin, end)| {
-            data.get(begin..end)
+            mdat.get(begin..end)
                 .ok_or(ContainerError::Truncated("mdat"))
         })
         .collect()
@@ -511,6 +540,7 @@ mod tests {
         trun_flags: u32,
         rows: Vec<u8>,
         count: u32,
+        rewind: u32,
     }
 
     fn fragment(moov: &[u8], moof: &Moof, mdat: &[u8]) -> Vec<u8> {
@@ -525,7 +555,11 @@ mod tests {
                 b"trun",
                 0,
                 moof.trun_flags,
-                &[&moof.count.to_be_bytes(), &offset.to_be_bytes(), &moof.rows],
+                &[
+                    &moof.count.to_be_bytes(),
+                    &offset.wrapping_sub(moof.rewind).to_be_bytes(),
+                    &moof.rows,
+                ],
             );
             let traf = boxed(b"traf", &[&tfhd, &moof.tfdt, &trun]);
             boxed(b"moof", &[&traf])
@@ -547,6 +581,7 @@ mod tests {
             trun_flags: TRUN_DATA_OFFSET | TRUN_DURATION | TRUN_SIZE,
             rows,
             count: 2,
+            rewind: 0,
         }
     }
 
@@ -614,6 +649,34 @@ mod tests {
         assert_eq!(
             parse_mp4_fragment(&data),
             Err(ContainerError::Truncated("mdat"))
+        );
+    }
+
+    #[test]
+    fn rejects_packets_outside_mdat() {
+        let moof = Moof {
+            rewind: 8,
+            ..explicit_rows()
+        };
+        let data = fragment(&moov(0), &moof, &[1, 2, 3, 4, 5]);
+
+        assert_eq!(
+            parse_mp4_fragment(&data),
+            Err(ContainerError::Truncated("mdat"))
+        );
+    }
+
+    #[test]
+    fn rejects_end_time_that_overflows() {
+        let moof = Moof {
+            tfdt: full(b"tfdt", 1, 0, &[&u64::MAX.to_be_bytes()]),
+            ..explicit_rows()
+        };
+        let data = fragment(&moov(0), &moof, &[1, 2, 3, 4, 5]);
+
+        assert_eq!(
+            parse_mp4_fragment(&data),
+            Err(ContainerError::Unsupported("decode time"))
         );
     }
 

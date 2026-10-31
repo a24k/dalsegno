@@ -16,16 +16,24 @@ const MAX_SIZE_BYTES: usize = 8;
 pub fn parse_webm_start_time(data: &[u8]) -> Result<f64, ContainerError> {
     let mut offset = 0;
     let mut scale = DEFAULT_TIMECODE_SCALE;
+    let mut in_cluster = false;
     while offset < data.len() {
         let (id, after_id) = read_id(data, offset)?;
         let (size, payload) = read_size(data, after_id)?;
         match id {
-            SEGMENT | INFO | CLUSTER => offset = payload,
+            SEGMENT | INFO => offset = payload,
+            CLUSTER => {
+                in_cluster = true;
+                offset = payload;
+            }
             TIMECODE_SCALE => {
                 scale = read_uint(data, payload, known(size)?)?;
+                if scale == 0 {
+                    return Err(ContainerError::Unsupported("timecode scale"));
+                }
                 offset = payload + known(size)?;
             }
-            TIMECODE => {
+            TIMECODE if in_cluster => {
                 let ticks = read_uint(data, payload, known(size)?)?;
                 return Ok(ticks as f64 * scale as f64 / NANOS_PER_SECOND);
             }
@@ -156,6 +164,40 @@ mod tests {
             parse_webm_start_time(&data),
             Err(ContainerError::Unsupported("integer width"))
         );
+    }
+
+    #[test]
+    fn rejects_zero_timecode_scale() {
+        let data = file(&[0x00], &[0x01]);
+
+        assert_eq!(
+            parse_webm_start_time(&data),
+            Err(ContainerError::Unsupported("timecode scale"))
+        );
+    }
+
+    #[test]
+    fn ignores_timecode_outside_a_cluster() {
+        let stray = element(&TIMECODE, &[0x01]);
+        let segment = unknown_size(&SEGMENT, &[stray, cluster(&[0x03, 0xE8])].concat());
+
+        assert_eq!(parse_webm_start_time(&segment), Ok(1.0));
+    }
+
+    #[test]
+    fn never_panics_on_corrupted_input() {
+        let data = file(&[0x0F, 0x42, 0x40], &[0x01, 0x00]);
+
+        for index in 0..data.len() {
+            for value in [0x00, 0x01, 0x7f, 0xff] {
+                let corrupted: Vec<u8> = data
+                    .iter()
+                    .enumerate()
+                    .map(|(i, byte)| if i == index { value } else { *byte })
+                    .collect();
+                let _ = parse_webm_start_time(&corrupted);
+            }
+        }
     }
 
     #[test]
