@@ -1,0 +1,16 @@
+[package]
+name = "dalsegno-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+dalsegno-test-support = { path = "../test-support" }
+
+[lints]
+workspace = true

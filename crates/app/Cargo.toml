@@ -1,0 +1,15 @@
+[package]
+name = "dalsegno-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+dalsegno-core.workspace = true
+dalsegno-io.workspace = true
+dalsegno-store.workspace = true
+
+[lints]
+workspace = true

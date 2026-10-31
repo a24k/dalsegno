@@ -1,0 +1,150 @@
+# Analysis
+
+Algorithms in `core`, all pure functions over in-memory series. The baseline is the
+10 Hz envelope. Milestone 7 replaces `diff` and `refine`, behind the same interfaces.
+
+## Feature pipeline
+
+Each contiguous run of stored audio has its own cursor in `feature_runs`, consumed in `sq`
+order (D-07):
+
+```text
+audio fragment -> container reader -> AAC packets -> decoder (one per contiguous run)
+  -> mono, 2 kHz -> 200-sample RMS -> log1p -> envelope row
+```
+
+- **Grid.** Within a run, sample position counts continuously from the run's anchor, which
+  is what makes incremental output equal batch output. A bin of 0.1 s belongs to the
+  fragment in which it starts, and the cursor carries partial bins.
+- **Drift check.** If the sample position and measured `stream_time` disagree by over
+  50 ms, log a warning and start a new run. This also covers the origin skipping time.
+- **Restart.** Resume one fragment early, discarding output, to re-prime the decoder.
+- **Gaps.** Reset the decoder, drop the partial bin and start a new run on the same grid.
+- **Filled gaps.** A fill becomes a run that also recomputes the first fragment after the
+  gap, which was decoded without its predecessor, and then merges with the following run.
+
+Resampling uses a windowed-sinc filter rather than reproducing ffmpeg's exactly. The Python
+envelopes are a compatibility reference, not a measure of accuracy: the thresholds in
+[spike S4](../reference/m0-spikes.md#s4-envelope) catch regressions, and the known answers in
+milestone 3 decide whether the envelope is good enough for analysis.
+
+## Series
+
+```rust
+pub struct Series {
+    pub start_time: f64,
+    pub rate: f64,
+    pub values: Vec<f32>,
+    pub valid: Vec<bool>,
+}
+```
+
+Analysis loads a `Series` from envelope rows. Holes are explicit. Before correlation,
+invalid samples are filled with the local mean, and any window with more than 10%
+invalid samples scores `None`.
+
+## NCC
+
+As specified in measured-facts section 4.2: numerator by real FFT, denominators by
+cumulative sums in `f64`, with positions where `σ_e(k) ≤ 0.3 σ_r` scored as 0.
+
+The result distinguishes three outcomes (D-05), and consumers must handle all of them:
+
+```rust
+pub enum Match { NoData, NoMatch, Lag { lag: f64, score: f32 } }
+```
+
+Property tests assert `|ncc| ≤ 1` up to rounding, including on silent input.
+
+## Period estimation
+
+1. Take six 600-second references, 30 minutes apart, ending near the tail.
+2. For each, find peaks scoring at least 0.9 in the candidate range.
+3. Take the **smallest** peak lag per reference (D-02), then the median.
+4. Accept when at least four references agree within 2 s. A match at `2P` is recorded as
+   added confidence (D-02).
+5. Otherwise return `NoPeriod { testable_up_to }` (D-03).
+
+The range defaults to 30 minutes to 24 hours and, once known, narrows to the tracking range.
+
+## Lag tracking
+
+Every 30 s, a 60-second reference is searched in `[max(P/2, P − 3 h), min(3P/2, P + 3 h)]`
+(D-01, D-04). A reference whose target at `t − P` is invalid yields `NoData` (D-05).
+Consecutive points with equal lag, within 1 s, form a `LagRun`. A short run with a
+different lag on both sides is an `Outlier`, excluded from decisions. Outliers usually
+come from known material, and are labelled as such when they overlap a known clip.
+
+The threshold starts at 0.65 (range 0.6–0.7 from the measurements). Runs and the watermark
+are persisted in each pass, so a restart loses nothing (D-25).
+
+## Change detection
+
+Evaluated after each tracking pass:
+
+| Signal | Condition | Meaning |
+| --- | --- | --- |
+| Lag shift | A run of at least 10 minutes settles at `P + Δ`, `Δ ≠ 0` | Net change of Δ. |
+| Unmatched run | At least 4 consecutive points of `NoMatch`, not `NoData` (D-04) | New content, including a net-zero replacement. |
+| Lost track | No stable run for 30 minutes | Widen the search until a run stabilises (D-01), and treat the interval as a transition (D-09). |
+
+Score drops alone never fire. After any signal, the old and new period comparison at 5 s
+steps narrows the start and end to within the window size (±30–60 s).
+
+## Change lifecycle
+
+```mermaid
+stateDiagram-v2
+  [*] --> provisional: signal
+  provisional --> provisional: more regions, or further change
+  provisional --> confirmed: one stable cycle seen
+  confirmed --> resolved: exports done
+  confirmed --> dismissed: operator
+  provisional --> dismissed: operator
+```
+
+Provisional creation enqueues prefetch, sets the DVR deadline and notifies. Confirmation
+creates the version, holds its audio and features, runs diff and self-checks, and notifies
+once more (D-08). Each state change commits together with its outbox row, so a crash can
+neither lose nor duplicate an alert (D-25).
+
+## Version comparison
+
+Baseline, from measured-facts section 4.5:
+
+1. Cut the current cycle into 60-second windows at 30-second steps.
+2. Search each in every stored version's cycle, extended 10 minutes either side.
+3. Per window, record best version, position and score.
+4. Convert to `shift = t_new − t_old`, and detect where shift changes, ignoring brief flips.
+5. Classify:
+
+| Class | Rule |
+| --- | --- |
+| existing | Stable match in the previous version. |
+| revival | No stable match in the previous version; stable match in an older one. |
+| known | Overlaps a registered known clip. |
+| new | No stable match anywhere. |
+| deleted | Region of the previous version with no counterpart. |
+
+The window search is rayon-parallel, using one FFT plan per thread.
+
+## Self-checks
+
+```rust
+pub struct SelfCheck { name: String, expected: f64, actual: f64, tolerance: f64, passed: bool }
+```
+
+- Sum of shift changes equals the period change.
+- Inserted (new, revival and known regions) minus deleted equals the period change.
+
+Tolerance starts at 5 s (the known example is off by 1 s). A failure asks for human
+review and never blocks the workflow.
+
+## Evaluation (milestone 7)
+
+The harness is built before any algorithm is replaced. Inputs are the known answers and
+synthetic cases: volume change, noise, repeated inserts, replacements with deletion,
+equal-length replacement, and period shrinkage. Output is a stored report of boundary
+error and precision/recall per commit of interest. Replacements proceed in this order:
+segment alignment by offset voting, known-material masking with full-history matching,
+richer features, sub-second boundaries. Each must improve the report.
