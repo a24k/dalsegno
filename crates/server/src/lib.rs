@@ -1,5 +1,6 @@
 //! HTTP API, scheduler, job runner and stream supervisors.
 
+use api::{ApiState, router};
 use dalsegno_app::acquisition::{Acquisition, AcquisitionOptions, IpPolicy, Library};
 use dalsegno_app::backfill::DEFAULT_HOURS;
 use dalsegno_app::config::Config;
@@ -14,9 +15,11 @@ use runner::{JobFuture, JobHandler, JobRunner};
 use scheduler::{SWEEP, run_scheduler};
 use std::sync::Arc;
 use supervisor::{FollowFuture, Follower, Supervisor};
+use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::watch;
 
+pub mod api;
 pub mod notifier;
 pub mod runner;
 pub mod scheduler;
@@ -77,6 +80,10 @@ impl Follower for Service {
     }
 }
 
+async fn stopped(mut shutdown: watch::Receiver<bool>) {
+    let _ = shutdown.wait_for(|is_stopping| *is_stopping).await;
+}
+
 /// Runs the service until it is told to stop.
 pub async fn serve(config: &Config, policy: IpPolicy) -> anyhow::Result<()> {
     let library = Library::open(&config.data)?;
@@ -85,6 +92,8 @@ pub async fn serve(config: &Config, policy: IpPolicy) -> anyhow::Result<()> {
         policy,
         cookies: config.cookies.clone(),
     })?;
+    let listener = TcpListener::bind(config.bind).await?;
+    let api = router(ApiState::new(library.clone()));
     let service = Arc::new(Service {
         acquisition,
         library,
@@ -105,10 +114,16 @@ pub async fn serve(config: &Config, policy: IpPolicy) -> anyhow::Result<()> {
                 Notifier::new(database.clone(), Arc::new(hook), config.public_url.clone());
             tokio::spawn(notifier.run(shutdown.clone()))
         });
-    let streams = tokio::spawn(Supervisor::new(database, service).run(shutdown));
+    let streams = tokio::spawn(Supervisor::new(database, service).run(shutdown.clone()));
+    let http = tokio::spawn(
+        axum::serve(listener, api)
+            .with_graceful_shutdown(stopped(shutdown))
+            .into_future(),
+    );
     signal::ctrl_c().await?;
     tracing::info!("service stopping");
     stop.send(true)?;
+    http.await??;
     streams.await?;
     jobs.await?;
     schedule.await?;

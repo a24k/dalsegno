@@ -8,12 +8,18 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
 dalsegno-app.workspace = true
 dalsegno-io.workspace = true
 dalsegno-store.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower.workspace = true
 
 [lints]
 workspace = true

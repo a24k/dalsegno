@@ -25,7 +25,7 @@
 | Link to program | `POST /streams/{id}/link` | `dalsegno link <id> <program>` |
 | Program detail, edit | `GET`, `PUT /programs/{id}` | `dalsegno set` |
 | Versions | `GET /programs/{id}/versions` | `dalsegno versions` |
-| Changes | `GET /programs/{id}/changes` | `dalsegno scan` |
+| Changes | `GET /changes`, `GET /programs/{id}/changes` | `dalsegno scan` |
 | Change detail | `GET /changes/{id}` | `dalsegno diff` |
 | Comparison | `GET /changes/{id}/diff` | `dalsegno diff` |
 | Dismiss change | `POST /changes/{id}/dismiss` | `dalsegno dismiss` |
