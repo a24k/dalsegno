@@ -2,7 +2,7 @@
 services:
   dalsegno:
     # A release line, so that updates are a decision. See D-32 before going back to an older one.
-    image: ghcr.io/a24k/dalsegno:0.1
+    image: ghcr.io/a24k/dalsegno:0.5
     restart: unless-stopped
     # The library owner, so that output arrives with the right ownership.
     user: "${DALSEGNO_UID}:${DALSEGNO_GID}"

@@ -317,6 +317,9 @@ A service that records for days must not change under its operator, and `latest`
 would make a run's results unreadable.
 
 **Decision.** A release is a tag `vX.Y.Z` that matches `Cargo.toml`, and only a release moves
-`latest`. Hosts pin a release line such as `0.1`. A new database schema raises at least the minor
-version, as migrations only go forward and an older build refuses a newer database, so going back
-over one needs the database as it was. Back it up before such an update.
+`latest`. Hosts pin a release line such as `0.5`. The minor version follows the milestones: `0.5` is
+milestone 5 done, and `1.0` waits for milestone 7 and a settled run. A milestone that ends in a run
+of days is first tagged `vX.Y.0-rc.N`, which moves neither `latest` nor the release line, and the
+run happens on that, so the release is what was run. A new database schema raises at least the
+minor version, as migrations only go forward and an older build refuses a newer database, so going
+back over one needs the database as it was. Back it up before such an update.
