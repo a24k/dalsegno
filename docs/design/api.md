@@ -45,7 +45,8 @@ SSE events are `job.progress`, `stream.state`, `change.updated`.
 
 ## CLI
 
-`DALSEGNO_URL` selects the service, with `http://127.0.0.1:<port>` as default. Output is
+`dalsegno serve` runs the service. `DALSEGNO_URL` selects it, with `http://127.0.0.1:8737` as
+default. Output is
 human-readable by default, or `--json` for scripts.
 
 Offline commands read files and never need the service (FR-N11). Passing `--env` selects

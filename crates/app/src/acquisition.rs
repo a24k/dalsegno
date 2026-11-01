@@ -53,6 +53,11 @@ pub struct Library {
 }
 
 impl Library {
+    /// Returns the database, for the service's own work.
+    pub fn database(&self) -> SharedDatabase {
+        Arc::clone(&self.database)
+    }
+
     /// Opens or creates the library.
     pub fn open(data_dir: &Path) -> Result<Self, AcquireError> {
         fs::create_dir_all(data_dir)?;

@@ -3,6 +3,7 @@
 pub mod acquisition;
 pub use dalsegno_core::analysis;
 pub mod backfill;
+pub mod config;
 pub mod doctor;
 pub mod error;
 pub mod export;
