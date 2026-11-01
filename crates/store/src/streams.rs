@@ -24,7 +24,8 @@ pub enum StreamState {
 }
 
 impl StreamState {
-    fn as_str(self) -> &'static str {
+    /// Returns the stored name, which the API also shows.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Registered => "registered",
             Self::Backfilling => "backfilling",
@@ -35,7 +36,7 @@ impl StreamState {
         }
     }
 
-    fn parse(text: &str) -> Result<Self, StoreError> {
+    pub(crate) fn parse(text: &str) -> Result<Self, StoreError> {
         match text {
             "registered" => Ok(Self::Registered),
             "backfilling" => Ok(Self::Backfilling),
