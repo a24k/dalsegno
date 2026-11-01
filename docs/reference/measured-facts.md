@@ -123,7 +123,7 @@ The judgment is made not on individual windows but on **where the sections in wh
 Notes:
 
 - If compared only with the immediately preceding version, the revival of a song that was in an even earlier version also becomes "new" (addition A of 2026-10-31 is a case). **Keep the envelopes of all past versions, so that matching against all versions is possible**
-- An insertion is sometimes a replacement that involves deleting existing parts (10/26: about 16 minutes in and about 4 minutes out for +12 minutes; 10/31: about 72 minutes in and about 15 minutes out for +57 minutes)
+- An insertion is sometimes a replacement that involves deleting existing parts (10/26: about 16 minutes in and about 4 minutes out for +12 minutes; 10/31: about 69 minutes in and about 12 minutes out for +57 minutes, in addition B; addition A replaced nothing)
 
 ## 4.6 Handling known material (the recurring MV and the like)
 
@@ -177,7 +177,7 @@ Use different parameters when examining the whole coarsely and when examining fi
 
 - Keyframes, for a file obtained from fragment boundaries, are every 5 seconds from the start. To check, look at the lines marked `K` with `ffprobe -read_intervals A%B -select_streams v -show_entries packet=pts_time,flags` (`-skip_frame nokey` does not work with VP9)
 - **Start point**: a keyframe inside the silence/black. If there are several, a person chooses (in practice "a few seconds before the black" and "the start of the silence" were preferred)
-- **End point**: even with `-c copy`, the end can be cut at any frame. Make it a position where not a single frame of the next content enters, such as the moment the sound disappears (silence_start)
+- **End point**: even with `-c copy`, the end can be cut at any frame. Make it a position where not a single frame of the next content enters, such as the moment the sound disappears (silence_start). A piece that closes on a card in silence ends just before the sound returns instead, about 18 seconds later in the one measured case
 - `-to` in `ffmpeg -ss <start> -i in -to <length> -map 0 -c copy` becomes "elapsed time from the start of the cut" when `-ss` is placed before the input. Beware of miscalculation
 
 ## 5.3 Cutting one pass and refining the period

@@ -85,6 +85,25 @@ impl Database {
         Ok(rows)
     }
 
+    /// Returns the `sq` of the stored fragment playing at a stream time, or the last one before.
+    pub fn fragment_at_time(
+        &self,
+        stream_id: i64,
+        itag: u32,
+        time: f64,
+    ) -> Result<Option<u64>, StoreError> {
+        let sq: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT sq FROM fragments WHERE stream_id = ?1 AND itag = ?2 AND stream_time <= ?3
+                 ORDER BY stream_time DESC LIMIT 1",
+                params![stream_id, itag, time],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(sq.map(|sq| sq as u64))
+    }
+
     /// Returns the lowest and highest stored `sq`.
     pub fn fragment_bounds(
         &self,

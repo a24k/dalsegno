@@ -296,3 +296,17 @@ these silences where they were, and they are absent from flat music. Once a stre
 cut at its silences and judged video by video, in comparison and in tracking, so that a change has
 the edges of the video that changed. They are read from the envelope, so no audio is decoded again.
 Candidates for cutting remain [the export design's](design/export.md) black and silence detection.
+
+### D-31 The edges of a change are not the edges of a piece
+
+A region says what changed, not what belongs together. On the reference stream one stretch of a
+change joined four pieces of different origin, and the end a person chose lay 13 minutes before the
+end of the stretch. That piece closes on a card in silence, so its sound stops about 18 s before
+its end, and the first end candidate, the moment the sound stops, was wrong by that much.
+
+**Decision.** What makes a piece stays a person's call (G3). The tool's job is to offer the boundary
+that person wants and let it be checked quickly, so offering it comes before ranking it first:
+ends cover both edges of a silence, regions report the video boundaries inside them, and confirmed
+boundaries are kept as known answers. An end at a returning sound sits 0.1 s before it, as the next
+video has begun by then. A silence running off the end of the examined audio never returned, so it
+offers no such end.

@@ -2,20 +2,23 @@
 
 use anyhow::{anyhow, bail};
 use clap::{Parser, Subcommand};
-use dalsegno_app::acquisition::{
-    Acquisition, AcquisitionOptions, AddReport, FetchRequest, Library,
+use dalsegno_app::acquisition::{Acquisition, AcquisitionOptions, FetchRequest, Library};
+use dalsegno_app::analysis::PeriodConfig;
+use dalsegno_app::backfill::DEFAULT_HOURS;
+use dalsegno_app::export::{
+    AirTime, CutRequest, DEFAULT_SUFFIX, DEFAULT_TEMPLATE, ExportKind, NewProgram, Ownership,
+    PlexTarget, PublishRequest, Redacted, TagEdits, find_tools,
 };
-use dalsegno_app::analysis::{Diff, PeriodConfig};
-use dalsegno_app::backfill::{BackfillReport, DEFAULT_HOURS};
-use dalsegno_app::doctor::DoctorReport;
-use dalsegno_app::features::FeatureReport;
-use dalsegno_app::fetch::FetchReport;
-use dalsegno_app::offline::{self, DiffRequest, PeriodReport, ScanReport};
-use dalsegno_app::probe::ProbeReport;
-use dalsegno_app::retention::SweepReport;
+use dalsegno_app::offline::{self, DiffRequest};
 use serde::Serialize;
 use std::path::PathBuf;
+use text::{
+    add_text, backfill_text, candidates_text, cut_text, diff_text, doctor_text, features_text,
+    fetch_text, period_text, probe_text, publish_text, refine_text, scan_text, sweep_text,
+};
 use tracing_subscriber::filter::LevelFilter;
+
+mod text;
 
 /// Command-line interface for dalsegno.
 #[derive(Debug, Parser)]
@@ -119,6 +122,112 @@ enum Command {
         #[arg(long)]
         max: Option<f64>,
     },
+    /// Give a stream its program, which holds naming and the output folder.
+    Program {
+        /// Video ID or URL.
+        stream: String,
+        /// Short name, which starts each output name.
+        #[arg(long)]
+        short_name: String,
+        /// Folder inside the library that receives output.
+        #[arg(long)]
+        output_dir: String,
+        /// Template for output names.
+        #[arg(long, default_value = DEFAULT_TEMPLATE)]
+        template: String,
+        /// Suffix of addition names.
+        #[arg(long, default_value = DEFAULT_SUFFIX)]
+        suffix: String,
+        /// The `artist` tag.
+        #[arg(long)]
+        artist: Option<String>,
+        /// The `date` tag, shared by everything from this stream.
+        #[arg(long)]
+        date: Option<String>,
+        /// The `description` tag of a cycle.
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// List where a cut near a stream time could start and end. A person chooses.
+    Candidates {
+        /// Video ID or URL.
+        stream: String,
+        /// Stream time of the boundary, in seconds.
+        #[arg(long)]
+        time: f64,
+    },
+    /// Measure the period from black at a boundary and one cycle later.
+    Refine {
+        /// Video ID or URL.
+        stream: String,
+        /// Stream time of the boundary, in seconds.
+        #[arg(long)]
+        boundary: f64,
+        /// The period from audio, in seconds.
+        #[arg(long)]
+        period: f64,
+    },
+    /// Write the finished folder of a cut in the work area.
+    Cut {
+        /// Video ID or URL.
+        stream: String,
+        /// What it holds.
+        #[arg(long, value_enum)]
+        kind: CutKind,
+        /// The fragment whose start is the chosen keyframe.
+        #[arg(long)]
+        start_sq: u64,
+        /// Length, in seconds. The end can be any frame.
+        #[arg(long)]
+        duration: f64,
+        /// The moment the name refers to, in Unix seconds.
+        #[arg(long)]
+        named_at: i64,
+        /// Stream time the version went on air, which a cycle must lie after.
+        #[arg(long)]
+        air_from: Option<f64>,
+        /// Stream time the version was superseded.
+        #[arg(long)]
+        air_until: Option<f64>,
+        /// Cut a cycle outside its air time, or with no air time given.
+        #[arg(long)]
+        override_air_time: bool,
+        /// Replace the proposed `artist` tag.
+        #[arg(long)]
+        artist: Option<String>,
+        /// Replace the proposed `date` tag.
+        #[arg(long)]
+        date: Option<String>,
+        /// Replace the proposed `description` tag.
+        #[arg(long)]
+        description: Option<String>,
+        /// Where the poster frame of an addition sits, in seconds from its start.
+        #[arg(long)]
+        poster_seconds: Option<f64>,
+    },
+    /// Move a finished folder into the library, and ask Plex for it.
+    Publish {
+        /// Clip row ID, which `cut` reports.
+        clip: i64,
+        /// Library root.
+        #[arg(long, env = "DALSEGNO_LIBRARY")]
+        library: PathBuf,
+        /// Octal mode of the files.
+        #[arg(long, default_value = "640", value_parser = parse_mode)]
+        mode: u32,
+        /// Owner of the files, as uid:gid.
+        #[arg(long, value_parser = parse_owner)]
+        owner: Option<(u32, u32)>,
+        /// Plex base URL.
+        #[arg(long, env = "DALSEGNO_PLEX_URL")]
+        plex_url: Option<String>,
+        /// Plex token.
+        #[arg(long, env = "DALSEGNO_PLEX_TOKEN", hide_env_values = true)]
+        plex_token: Option<String>,
+        /// Plex library section.
+        #[arg(long)]
+        plex_section: Option<u32>,
+    },
     /// Track the lag through an envelope file and report changes.
     Scan {
         /// Envelope file.
@@ -149,6 +258,41 @@ enum Command {
         #[arg(long)]
         known: Option<PathBuf>,
     },
+}
+
+/// What a cut holds.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum CutKind {
+    /// The first cycle, named by the date it was acquired.
+    FirstCycle,
+    /// A later cycle, named by the moment the playlist switched.
+    Cycle,
+    /// Only what a version added.
+    Addition,
+}
+
+impl From<CutKind> for ExportKind {
+    fn from(kind: CutKind) -> Self {
+        match kind {
+            CutKind::FirstCycle => Self::FirstCycle,
+            CutKind::Cycle => Self::Cycle,
+            CutKind::Addition => Self::Addition,
+        }
+    }
+}
+
+fn parse_mode(text: &str) -> Result<u32, String> {
+    u32::from_str_radix(text, 8)
+        .ok()
+        .filter(|mode| *mode <= 0o777)
+        .ok_or_else(|| "expected an octal mode such as 640".to_string())
+}
+
+fn parse_owner(text: &str) -> Result<(u32, u32), String> {
+    let parsed = text
+        .split_once(':')
+        .and_then(|(user, group)| Some((user.parse().ok()?, group.parse().ok()?)));
+    parsed.ok_or_else(|| "expected uid:gid".to_string())
 }
 
 #[tokio::main]
@@ -199,6 +343,112 @@ async fn main() -> anyhow::Result<()> {
         Command::Sweep => {
             let report = library()?.sweep().await?;
             print_report(cli.json, &report, sweep_text)
+        }
+        Command::Program {
+            stream,
+            short_name,
+            output_dir,
+            template,
+            suffix,
+            artist,
+            date,
+            description,
+        } => {
+            let id = library()?.set_program(
+                &stream,
+                &NewProgram {
+                    short_name,
+                    channel_id: None,
+                    name_template: template,
+                    addition_suffix: suffix,
+                    artist,
+                    content_date: date,
+                    description,
+                    output_dir,
+                },
+            )?;
+            print_report(cli.json, &id, |id| format!("program: {id}\n"))
+        }
+        Command::Candidates { stream, time } => {
+            let tools = find_tools()?;
+            let report = acquisition
+                .candidates(&library()?, &tools, &stream, time)
+                .await?;
+            print_report(cli.json, &report, candidates_text)
+        }
+        Command::Refine {
+            stream,
+            boundary,
+            period,
+        } => {
+            let tools = find_tools()?;
+            let report = acquisition
+                .refine(&library()?, &tools, &stream, boundary, period)
+                .await?;
+            print_report(cli.json, &report, refine_text)
+        }
+        Command::Cut {
+            stream,
+            kind,
+            start_sq,
+            duration,
+            named_at,
+            air_from,
+            air_until,
+            override_air_time,
+            artist,
+            date,
+            description,
+            poster_seconds,
+        } => {
+            let tools = find_tools()?;
+            let request = CutRequest {
+                stream,
+                kind: kind.into(),
+                start_sq,
+                duration,
+                named_at,
+                air_time: air_from.map(|from| AirTime {
+                    from,
+                    until: air_until,
+                }),
+                override_air_time,
+                tags: TagEdits {
+                    artist,
+                    date,
+                    description,
+                },
+                poster_seconds,
+            };
+            let report = acquisition.cut(&library()?, &tools, &request).await?;
+            print_report(cli.json, &report, cut_text)
+        }
+        Command::Publish {
+            clip,
+            library: library_root,
+            mode,
+            owner,
+            plex_url,
+            plex_token,
+            plex_section,
+        } => {
+            let plex = match (plex_url, plex_token, plex_section) {
+                (Some(url), Some(token), Some(section)) => Some(PlexTarget {
+                    url,
+                    token: Redacted::new(token),
+                    section,
+                }),
+                (None, None, None) => None,
+                _ => bail!("Plex needs its URL, token and section together"),
+            };
+            let request = PublishRequest {
+                clip,
+                library_root,
+                ownership: Ownership { mode, owner },
+                plex,
+            };
+            let report = library()?.publish(&request).await?;
+            print_report(cli.json, &report, publish_text)
         }
         // `run_offline` has already handled these.
         Command::Envelope { .. }
@@ -284,55 +534,6 @@ async fn run_offline(command: Command, json: bool) -> anyhow::Result<Option<Comm
     tokio::task::spawn_blocking(blocking).await?
 }
 
-fn period_text(report: &PeriodReport) -> String {
-    match (report.period, report.testable_up_to) {
-        (Some(period), _) => format!(
-            "period: {period:.1} s\nagreeing references: {}\nmatch at double: {}\n",
-            report.agreeing, report.confirmed_by_double
-        ),
-        (None, Some(limit)) => format!("no period found, testable up to {limit:.0} s\n"),
-        (None, None) => "no period found\n".to_string(),
-    }
-}
-
-fn scan_text(report: &ScanReport) -> String {
-    let runs = report.runs.iter().map(|run| {
-        let lag = run
-            .lag
-            .map_or(String::new(), |lag| format!(" lag {lag:.1} s"));
-        format!(
-            "{:.0}..{:.0} {:?}{lag} ({} points)\n",
-            run.start, run.end, run.kind, run.points
-        )
-    });
-    let signals = report
-        .signals
-        .iter()
-        .map(|signal| format!("signal: {signal:?}\n"));
-    runs.chain(signals).collect()
-}
-
-fn diff_text(report: &Diff) -> String {
-    let regions = report.regions.iter().map(|region| {
-        let moved = if region.moved { " (moved)" } else { "" };
-        format!(
-            "{:?}{moved} {:.0}..{:.0} ({:.0} s)\n",
-            region.class,
-            region.start,
-            region.end,
-            region.end - region.start
-        )
-    });
-    let checks = report.checks.iter().map(|check| {
-        let result = if check.passed { "ok" } else { "REVIEW" };
-        format!(
-            "{result}: {}: expected {:.1}, measured {:.1}\n",
-            check.name, check.expected, check.actual
-        )
-    });
-    regions.chain(checks).collect()
-}
-
 fn print_report<T: Serialize>(
     json: bool,
     report: &T,
@@ -346,119 +547,12 @@ fn print_report<T: Serialize>(
     Ok(())
 }
 
-fn or_none(value: Option<&str>) -> &str {
-    value.unwrap_or("none")
-}
-
-fn doctor_text(report: &DoctorReport) -> String {
-    let tools = report.tools.iter().map(|tool| {
-        format!(
-            "{}: {} ({})\n",
-            tool.name,
-            or_none(tool.path.as_deref()),
-            or_none(tool.version.as_deref())
-        )
-    });
-    let switch = report.last_switch.map_or("none".to_string(), |switch| {
-        format!(
-            "{} to {} at {}, {:?}",
-            switch.from, switch.to, switch.at, switch.reason
-        )
-    });
-    let resolution = report.resolution.iter().map(|check| {
-        format!(
-            "resolve over {}: {}\n",
-            check.family,
-            check.error.as_deref().unwrap_or("ok")
-        )
-    });
-    let family = format!(
-        "ipv6 route: {}\nip policy: {:?}\nactive family: {}\nlast switch: {switch}\n",
-        report.has_ipv6_route, report.policy, report.active_family
-    );
-    tools.chain([family]).chain(resolution).collect()
-}
-
-fn probe_text(report: &ProbeReport) -> String {
-    let format_line = |format: &Option<dalsegno_app::probe::FormatInfo>| {
-        format.as_ref().map_or("none".to_string(), |format| {
-            let codec = format.vcodec.as_ref().or(format.acodec.as_ref());
-            format!(
-                "itag {} ({}, {}p)",
-                format.itag,
-                or_none(codec.map(String::as_str)),
-                format.height.unwrap_or(0)
-            )
-        })
-    };
-    let summary = format!(
-        "title: {}\nshort name: {}\nchannel: {}\nfamily: {}\nhead sq: {}\nfragment length: {}\n\
-         audio: {}\nvideo: {}\n",
-        report.title,
-        report.short_name,
-        or_none(report.channel.as_deref()),
-        report.family,
-        report.head_sq,
-        report
-            .fragment_seconds
-            .map_or("unknown".to_string(), |seconds| format!("{seconds:.3} s")),
-        format_line(&report.audio),
-        format_line(&report.video),
-    );
-    let rejected = report
-        .rejected
-        .iter()
-        .map(|rejection| format!("rejected itag {}: {}\n", rejection.itag, rejection.reason));
-    std::iter::once(summary).chain(rejected).collect()
-}
-
-fn add_text(report: &AddReport) -> String {
-    format!(
-        "stream id: {}\n{}",
-        report.stream_id,
-        probe_text(&report.probe)
-    )
-}
-
-fn backfill_text(report: &BackfillReport) -> String {
-    format!(
-        "head sq: {}\nfetched: {}\nlost: {}\nstill open: {}\n",
-        report.head_sq, report.fetched, report.lost, report.failed
-    )
-}
-
-fn features_text(report: &FeatureReport) -> String {
-    format!(
-        "fragments: {}\nbins: {}\nruns: {}\nunreadable: {}\n",
-        report.fragments,
-        report.bins,
-        report.runs,
-        report.unreadable.len()
-    )
-}
-
-fn sweep_text(report: &SweepReport) -> String {
-    format!(
-        "expired: {}\norphans: {}\ntemporary: {}\nrepaired rows: {}\n",
-        report.expired, report.orphans, report.temporary, report.repaired
-    )
-}
-
-fn fetch_text(report: &FetchReport) -> String {
-    format!(
-        "fetched: {}\nalready stored: {}\nlost: {}\nfailed: {}\n",
-        report.fetched,
-        report.already_stored,
-        report.lost.len(),
-        report.failed.len()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::CommandFactory;
     use clap::error::ErrorKind;
+    use dalsegno_app::fetch::FetchReport;
 
     #[test]
     fn cli_definition_is_valid() {

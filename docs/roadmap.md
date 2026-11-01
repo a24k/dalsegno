@@ -65,6 +65,8 @@ estimation, lag tracking and version comparison must return the known values.
 `ensure-range`, candidates, contact sheet, period refinement, assembly, naming, folder
 output, transfer, Plex rescan and confirmation.
 
+Results are in [reference/m4-verification.md](reference/m4-verification.md).
+
 **Exit:** output matches the naming and folder rules and displays correctly in Plex.
 Today's manual process is fully replaced.
 

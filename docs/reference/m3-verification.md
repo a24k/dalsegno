@@ -140,8 +140,8 @@ trial is a hard test for it.
 
 - All of this comes from one stream. The thresholds may not suit another, and milestone 7's
   harness is what replaces them.
-- Edge accuracy is measured on synthetic signals only. There is no ground truth for the real
-  edges until they can be compared with the cuts in milestone 4.
+- Real edges were first compared with a person's cut and its frames in milestone 4, as recorded
+  in [m4-verification.md](m4-verification.md#edges-against-a-cut).
 - "Addition A is a revival" could not be tested: the older version's audio is not in these
   envelopes, so it is reported as new. Revival has run on synthetic data only.
 - The second self-check mostly restates the first, as [analysis.md](../design/analysis.md#self-checks)

@@ -390,6 +390,58 @@ fn a_clip_longer_than_the_series_is_not_found() {
     assert_eq!(locate_clip(&current, &clip, 0.0..10.0, 0.8), []);
 }
 
+/// Flat audio, as the same recording reaches two versions: the level stays close, but correlation
+/// stays too low to place it by searching or to move an edge.
+fn flat_copies(seconds: f64) -> (Vec<f32>, Vec<f32>) {
+    let shrink = |seed: u64, scale: f32| -> Vec<f32> {
+        content(seed, seconds)
+            .iter()
+            .map(|value| (value - 8.0) * scale)
+            .collect()
+    };
+    let shared = shrink(40, 0.25);
+    let noise = shrink(41, 0.35);
+    let old = shared.iter().map(|value| 8.0 + value).collect();
+    let new = shared
+        .iter()
+        .zip(&noise)
+        .map(|(a, b)| 8.0 + a + b)
+        .collect();
+    (old, new)
+}
+
+#[test]
+fn flat_audio_after_an_addition_stays_existing_with_no_silence_to_mark_it() {
+    let (before, after) = (content(42, 1200.0), content(43, 1500.0));
+    let (flat_old, flat_new) = flat_copies(300.0);
+    let added = content(44, 500.0);
+    let old = [&before[..], &flat_old, &after].concat();
+    let new = [&before[..], &added, &flat_new, &after].concat();
+
+    let diff = compare_cycles(&old, &new);
+
+    let inserted = region(&diff, RegionClass::New);
+    assert!((inserted.end - 1700.0).abs() < 15.0, "{inserted:?}");
+    assert!(
+        !classes(&diff).contains(&RegionClass::Deleted),
+        "{:?}",
+        diff.regions
+    );
+}
+
+#[test]
+fn an_addition_keeps_its_end_when_the_audio_after_it_is_unrelated() {
+    let (before, after) = (content(45, 1200.0), content(46, 1500.0));
+    let (removed, added) = (content(47, 300.0), content(48, 800.0));
+    let old = [&before[..], &removed, &after].concat();
+    let new = [&before[..], &added, &after].concat();
+
+    let diff = compare_cycles(&old, &new);
+
+    assert!((region(&diff, RegionClass::New).end - 2000.0).abs() < 15.0);
+    assert!(classes(&diff).contains(&RegionClass::Deleted));
+}
+
 #[test]
 fn distance_wraps_around_the_period() {
     assert_eq!(circular_distance(1.0, 2999.0, 3000.0), 2.0);
