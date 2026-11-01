@@ -1,7 +1,8 @@
 # Copy to compose.yaml and adjust. Secrets go in .env, which is not tracked.
 services:
   dalsegno:
-    build: .
+    # Published from main once CI passes. Pin a sha- tag to stay on one commit.
+    image: ghcr.io/a24k/dalsegno:latest
     restart: unless-stopped
     # The library owner, so that output arrives with the right ownership.
     user: "${DALSEGNO_UID}:${DALSEGNO_GID}"
