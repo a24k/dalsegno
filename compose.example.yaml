@@ -1,0 +1,23 @@
+# Copy to compose.yaml and adjust. Secrets go in .env, which is not tracked.
+services:
+  dalsegno:
+    build: .
+    restart: unless-stopped
+    # The library owner, so that output arrives with the right ownership.
+    user: "${DALSEGNO_UID}:${DALSEGNO_GID}"
+    # Loopback only. Anything wider needs an authenticating proxy in front (D-20).
+    ports:
+      - "127.0.0.1:8737:8737"
+    volumes:
+      - ./data:/data
+      - ./config:/config:ro
+      - /path/to/library:/library
+    environment:
+      DALSEGNO_LIBRARY: /library
+      # DALSEGNO_COOKIES: /config/cookies.txt
+      # Use the webhook's internal address: a login proxy in front of it can lose messages.
+      DALSEGNO_WEBHOOK: "${DALSEGNO_WEBHOOK:-}"
+      DALSEGNO_WEBHOOK_FORMAT: mattermost
+      DALSEGNO_PUBLIC_URL: "${DALSEGNO_PUBLIC_URL:-}"
+      DALSEGNO_PLEX_URL: "${DALSEGNO_PLEX_URL:-}"
+      DALSEGNO_PLEX_TOKEN: "${DALSEGNO_PLEX_TOKEN:-}"
