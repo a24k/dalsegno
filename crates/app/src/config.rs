@@ -3,6 +3,7 @@
 //! The environment wins, so a container can override a mounted file.
 
 use dalsegno_core::redact::Redacted;
+use dalsegno_io::webhook::WebhookFormat;
 use serde::Deserialize;
 use std::env;
 use std::fs;
@@ -45,6 +46,7 @@ struct FileSettings {
     bind: Option<String>,
     cookies: Option<PathBuf>,
     webhook: Option<String>,
+    webhook_format: Option<String>,
     public_url: Option<String>,
     plex_url: Option<String>,
     plex_token: Option<String>,
@@ -63,6 +65,8 @@ pub struct Config {
     pub cookies: Option<PathBuf>,
     /// Notification webhook, which can embed a secret.
     pub webhook: Option<Redacted<String>>,
+    /// How the webhook wants its messages.
+    pub webhook_format: WebhookFormat,
     /// Base of the links in notifications.
     pub public_url: Option<String>,
     /// Plex base URL.
@@ -108,6 +112,12 @@ impl Config {
         let bind = read("DALSEGNO_BIND")
             .or(file.bind)
             .unwrap_or_else(|| DEFAULT_BIND.to_string());
+        let webhook_format = read("DALSEGNO_WEBHOOK_FORMAT")
+            .or(file.webhook_format)
+            .map_or(Some(WebhookFormat::Slack), |text| {
+                WebhookFormat::parse(&text)
+            })
+            .ok_or(ConfigError::Invalid("DALSEGNO_WEBHOOK_FORMAT"))?;
         Ok(Self {
             data: data.ok_or(ConfigError::Missing("DALSEGNO_DATA"))?,
             library: read("DALSEGNO_LIBRARY").map(PathBuf::from).or(file.library),
@@ -116,6 +126,7 @@ impl Config {
                 .map_err(|_| ConfigError::Invalid("DALSEGNO_BIND"))?,
             cookies: read("DALSEGNO_COOKIES").map(PathBuf::from).or(file.cookies),
             webhook: read("DALSEGNO_WEBHOOK").or(file.webhook).map(Redacted::new),
+            webhook_format,
             public_url: read("DALSEGNO_PUBLIC_URL").or(file.public_url),
             plex_url: read("DALSEGNO_PLEX_URL").or(file.plex_url),
             plex_token: read("DALSEGNO_PLEX_TOKEN")
@@ -191,6 +202,22 @@ mod tests {
         .unwrap();
 
         assert!(!format!("{config:?}").contains("sesame"));
+    }
+
+    #[test]
+    fn a_webhook_format_is_read_and_checked() {
+        let config = Config::merge(
+            file("data = \"/d\"\nwebhook_format = \"ntfy\""),
+            no_environment,
+        );
+        assert_eq!(config.unwrap().webhook_format, WebhookFormat::Ntfy);
+
+        let error = Config::merge(
+            file("data = \"/d\"\nwebhook_format = \"x\""),
+            no_environment,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ConfigError::Invalid(_)));
     }
 
     #[test]

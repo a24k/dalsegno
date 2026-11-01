@@ -7,6 +7,7 @@ pub mod features;
 pub mod fragments;
 pub mod gaps;
 pub mod jobs;
+pub mod notifications;
 pub mod programs;
 pub mod retention;
 pub mod streams;

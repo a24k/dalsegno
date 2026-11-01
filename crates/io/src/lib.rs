@@ -7,4 +7,5 @@ pub mod npy;
 pub mod plex;
 pub mod tools;
 pub mod transfer;
+pub mod webhook;
 pub mod ytdlp;
