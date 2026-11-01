@@ -135,7 +135,11 @@ CREATE TABLE changes (
   state TEXT NOT NULL CHECK (state IN
     ('provisional','confirmed','resolved','dismissed')),
   dvr_deadline_at INTEGER,
-  checks TEXT                         -- JSON array of SelfCheck
+  checks TEXT,                        -- JSON array of SelfCheck
+  start_time REAL NOT NULL,           -- stream time of the first signal
+  last_signal_time REAL NOT NULL,     -- a cycle must pass after this to confirm
+  last_delta REAL NOT NULL,           -- net change so far, in seconds
+  boundaries TEXT                     -- JSON array of video boundaries (FR-N13)
 );
 CREATE UNIQUE INDEX changes_one_provisional ON changes (program_id)
   WHERE state = 'provisional';
