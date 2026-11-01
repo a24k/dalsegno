@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use dalsegno_app::acquisition::{Acquisition, AcquisitionOptions, FetchRequest, Library};
 use dalsegno_app::analysis::PeriodConfig;
 use dalsegno_app::backfill::DEFAULT_HOURS;
+use dalsegno_app::config::Config;
 use dalsegno_app::export::{
     AirTime, CutRequest, DEFAULT_SUFFIX, DEFAULT_TEMPLATE, ExportKind, NewProgram, Ownership,
     PlexTarget, PublishRequest, Redacted, TagEdits, find_tools,
@@ -47,6 +48,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run the service until it is stopped.
+    Serve,
     /// Report tools, IPv6 route and IP family, and test URL resolution for a stream.
     Doctor {
         /// Video ID or URL to resolve over each family.
@@ -305,6 +308,9 @@ async fn main() -> anyhow::Result<()> {
     let Some(command) = cli.command else {
         return Ok(());
     };
+    if matches!(command, Command::Serve) {
+        return dalsegno_server::serve(&Config::load()?).await;
+    }
     let json = cli.json;
     let command = match run_offline(command, json).await? {
         Some(command) => command,
@@ -454,7 +460,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Envelope { .. }
         | Command::Period { .. }
         | Command::Scan { .. }
-        | Command::Diff { .. } => Ok(()),
+        | Command::Diff { .. }
+        | Command::Serve => Ok(()),
         Command::Fetch {
             stream,
             itag,
