@@ -50,7 +50,14 @@ impl Neighbour<'_> {
         let matched = successors(Some(start), |time| Some(time + WALK_STEP))
             .take_while(|time| holds(*time))
             .last();
-        matched.map_or(start, |time| time + WALK_SECONDS)
+        matched.map_or(start, |time| {
+            let reached = time + WALK_SECONDS;
+            if end - reached < WALK_STEP {
+                end
+            } else {
+                reached
+            }
+        })
     }
 
     /// Walks back from the end of new audio for as long as it matches here. Returns the end of
@@ -61,7 +68,14 @@ impl Neighbour<'_> {
         let matched = successors(Some(end), |time| Some(time - WALK_STEP))
             .take_while(|time| holds(*time))
             .last();
-        matched.map_or(end, |time| time - WALK_SECONDS)
+        matched.map_or(end, |time| {
+            let reached = time - WALK_SECONDS;
+            if reached - start < WALK_STEP {
+                start
+            } else {
+                reached
+            }
+        })
     }
 }
 
@@ -166,6 +180,7 @@ fn walk_edges(
             walked.insert(first, side.claim((span.0, start)));
         }
     }
+    walked.retain(|part| part.end > part.start);
     walked
 }
 
@@ -336,6 +351,39 @@ mod tests {
         let snapped = snap_edges(&regions, &with_silence_at(100), &DiffConfig::default());
 
         assert_eq!(snapped[..], regions);
+    }
+
+    #[test]
+    fn a_stretch_that_all_matches_leaves_nothing_new() {
+        let data = prepared(&content(3, 300.0));
+        let config = DiffConfig::default();
+        let comparison = EdgeComparison {
+            current: &data,
+            earlier: &data,
+            period: 300.0,
+            offset: 0.0,
+            config: &config,
+        };
+        let side = Neighbour {
+            region: region(RegionClass::Existing, 102.0, 300.0),
+            found: Found {
+                version: 0,
+                shift: 0.0,
+                position: 0.0,
+                offset: 0.0,
+            },
+            comparison: &comparison,
+        };
+
+        for end in [100.0, 102.0] {
+            let parts = vec![region(RegionClass::New, 0.0, end)];
+
+            let walked = walk_edges(parts, None, Some(side));
+
+            assert_eq!(walked.len(), 1, "{walked:?}");
+            assert_eq!(walked[0].class, RegionClass::Existing);
+            assert_eq!((walked[0].start, walked[0].end), (0.0, end));
+        }
     }
 
     #[test]

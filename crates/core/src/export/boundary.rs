@@ -13,6 +13,9 @@ const PERIOD_SEARCH_SECONDS: f64 = 5.0;
 /// How long before the sound returns an end sits, in seconds. By then the next video has begun,
 /// and not one frame of it may get in.
 const RETURN_LEAD_SECONDS: f64 = 0.1;
+/// A silence ending this close to the end of the audio ran off it, in seconds. Audio and video
+/// end tens of milliseconds apart.
+const END_OF_AUDIO_MARGIN_SECONDS: f64 = 0.25;
 
 /// A stretch of a detector's output.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -206,7 +209,8 @@ pub fn end_candidates(
                 edge: EndEdge::SoundStops,
                 evidence,
             };
-            let returns = (interval.end < end_of_audio).then_some(EndCandidate {
+            let has_returned = interval.end < end_of_audio - END_OF_AUDIO_MARGIN_SECONDS;
+            let returns = has_returned.then_some(EndCandidate {
                 time: (interval.end - RETURN_LEAD_SECONDS).max(interval.start),
                 edge: EndEdge::SoundReturns,
                 evidence,
@@ -378,6 +382,16 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    // ffmpeg can report the end of a silence at the end of the audio, which ends a little before
+    // the video it is measured against.
+    #[test]
+    fn silence_reported_as_ending_at_the_end_of_the_audio_does_not_return() {
+        let ends = end_candidates(&[], &[interval(50.0, 59.98)], 60.0);
+
+        let times: Vec<f64> = ends.iter().map(|end| end.time).collect();
+        assert_eq!(times, [50.0]);
     }
 
     #[test]

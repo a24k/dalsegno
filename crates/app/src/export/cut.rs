@@ -146,7 +146,7 @@ fn check_air(request: &CutRequest, start: f64, end: f64) -> Result<(), AcquireEr
 }
 
 fn expected_fragments(request: &CutRequest, row: &StreamRow) -> u64 {
-    (request.duration / row.stream.fragment_len).ceil() as u64 - 1
+    ((request.duration / row.stream.fragment_len).ceil() as u64).saturating_sub(1)
 }
 
 fn is_thumbnail(url: &str) -> bool {
@@ -180,7 +180,10 @@ fn verify(
     let found = output
         .duration
         .ok_or_else(|| AcquireError::Verification("no duration".to_string()))?;
-    let frame = source_video.frame_rate.map_or(0.05, |rate| 1.0 / rate);
+    let frame = source_video
+        .frame_rate
+        .filter(|rate| *rate > 0.0)
+        .map_or(0.05, |rate| 1.0 / rate);
     if (found - duration).abs() > frame {
         return Err(AcquireError::Verification(format!(
             "{found} s instead of {duration} s"
@@ -234,8 +237,9 @@ impl Assembler<'_> {
             .ok_or(AcquireError::InvalidRequest("the start is out of range"))?;
         let mut database = lock(&self.library.database)?;
         if let Some(found) = database.clip_by_name(&name.name)? {
-            let is_same =
-                found.clip.sq_first == request.start_sq && found.clip.duration == request.duration;
+            let is_same = found.clip.stream_id == row.id
+                && found.clip.sq_first == request.start_sq
+                && found.clip.duration == request.duration;
             return if is_same {
                 Ok(found)
             } else {
@@ -641,6 +645,17 @@ mod tests {
     #[test]
     fn a_length_off_by_more_than_a_frame_fails() {
         let video = facts(None, "vp9", "");
+        let audio = facts(None, "", "aac");
+
+        assert!(verify(&facts(Some(10.5), "vp9", "aac"), &video, &audio, 10.0).is_err());
+    }
+
+    #[test]
+    fn a_frame_rate_of_zero_keeps_the_length_check() {
+        let video = MediaFacts {
+            frame_rate: Some(0.0),
+            ..facts(None, "vp9", "")
+        };
         let audio = facts(None, "", "aac");
 
         assert!(verify(&facts(Some(10.5), "vp9", "aac"), &video, &audio, 10.0).is_err());

@@ -69,8 +69,9 @@ is left out. An early version of them started the real yt-dlp for an invented vi
 
 ## Not covered
 
-- **Plex.** Nothing has run against a real Plex or the real library, only a mock server and a
-  local folder. "Displays correctly in Plex" is the operator's check, and the exit needs it.
+- **`publish` against Plex.** The operator placed a folder from `cut` in the library by hand, and
+  it checked out in a real Plex, which is the exit's check. `publish` itself has run only against
+  a mock server and a local folder.
 - **Live range fetches.** `ensure_range` was exercised only with everything already stored, and
   `candidates` and `refine` have not run against the origin.
 - **A full cycle.** Cuts were additions. A cycle takes about 8,500 fragments, and the air time
