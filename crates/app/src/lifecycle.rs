@@ -6,8 +6,11 @@
 use crate::acquisition::Library;
 use crate::error::AcquireError;
 use crate::fetch::lock;
+use dalsegno_core::export::{DEFAULT_SUFFIX, DEFAULT_TEMPLATE, check_output_dir};
+use dalsegno_core::stream::propose_short_name;
 use dalsegno_store::database::Database;
 use dalsegno_store::jobs::{JobClass, NewJob};
+use dalsegno_store::programs::{NewProgram, ProgramRow};
 use dalsegno_store::streams::{StreamRow, StreamState};
 use serde::{Deserialize, Serialize};
 
@@ -87,6 +90,39 @@ impl PrefetchTarget {
     pub fn parse(target: &str) -> Option<Self> {
         serde_json::from_str(target).ok()
     }
+}
+
+/// Returns a stream's program, making one from its title if it has none. Noticing a change
+/// needs a program to hang versions on, and it must not wait for a person to name one. The
+/// names can be changed at any time with `dalsegno program`.
+pub(crate) fn ensure_program(
+    database: &Database,
+    row: &StreamRow,
+) -> Result<ProgramRow, AcquireError> {
+    if let Some(program) = database.program_of_stream(row.id)? {
+        return Ok(program);
+    }
+    let short_name = propose_short_name(&row.stream.title);
+    let output_dir = if check_output_dir(&short_name).is_ok() {
+        short_name.clone()
+    } else {
+        row.stream.video_id.clone()
+    };
+    let program = NewProgram {
+        short_name,
+        channel_id: row.stream.channel_id.clone(),
+        name_template: DEFAULT_TEMPLATE.to_string(),
+        addition_suffix: DEFAULT_SUFFIX.to_string(),
+        artist: None,
+        content_date: None,
+        description: None,
+        output_dir,
+    };
+    database.atomically(|database| {
+        let id = database.insert_program(&program)?;
+        database.link_stream_to_program(row.id, id)?;
+        Ok::<_, AcquireError>(ProgramRow { id, program })
+    })
 }
 
 fn current_state(database: &Database, row: &StreamRow) -> Result<StreamState, AcquireError> {
@@ -170,6 +206,62 @@ mod tests {
             .unwrap()
             .set_stream_state(id, state, Some("a reason"))
             .unwrap();
+    }
+
+    fn stream_row(library: &Library, id: i64) -> StreamRow {
+        lock(&library.database)
+            .unwrap()
+            .stream(id)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_program_is_made_from_the_title_once() {
+        let (_root, library, id) = library();
+        let row = stream_row(&library, id);
+        let database = lock(&library.database).unwrap();
+
+        let first = ensure_program(&database, &row).unwrap();
+        let second = ensure_program(&database, &row).unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.program.short_name, "Example TV");
+        assert_eq!(first.program.output_dir, "Example TV");
+    }
+
+    #[test]
+    fn a_title_that_cannot_be_a_folder_falls_back_to_the_video_id() {
+        let (_root, library, id) = library();
+        let row = StreamRow {
+            stream: NewStream {
+                title: "../..".to_string(),
+                ..stream_row(&library, id).stream
+            },
+            ..stream_row(&library, id)
+        };
+        let database = lock(&library.database).unwrap();
+
+        let program = ensure_program(&database, &row).unwrap();
+
+        assert_eq!(program.program.output_dir, VIDEO);
+    }
+
+    #[test]
+    fn setting_a_program_keeps_the_one_made() {
+        let (_root, library, id) = library();
+        let row = stream_row(&library, id);
+        let made = ensure_program(&lock(&library.database).unwrap(), &row).unwrap();
+        let renamed = NewProgram {
+            short_name: "Renamed".to_string(),
+            ..made.program.clone()
+        };
+
+        assert_eq!(library.set_program(VIDEO, &renamed).unwrap(), made.id);
+
+        let database = lock(&library.database).unwrap();
+        let stored = database.program_of_stream(id).unwrap().unwrap();
+        assert_eq!(stored.program.short_name, "Renamed");
     }
 
     #[test]

@@ -81,6 +81,9 @@ dalsegno cut        <id> --kind <kind> --start-sq <sq> --duration <s> --named-at
 dalsegno publish    <clip> --library <dir>
 ```
 
+`program` is optional. A stream gets a program from its title the first time analysis or a cut
+needs one, so changes are noticed without it, and `program` then changes the names in place.
+
 Use the CLI when a judgement looks suspicious, for example a region classified as new that
 may actually be existing, to inspect the internals, or to cut a manually specified range.
 Each Web UI operation calls the same API, so it can be reproduced from the CLI.

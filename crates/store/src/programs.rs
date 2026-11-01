@@ -73,6 +73,28 @@ impl Database {
         Ok(self.connection.last_insert_rowid())
     }
 
+    /// Changes a program, which keeps its versions.
+    pub fn update_program(&self, id: i64, program: &NewProgram) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE programs SET short_name = ?2, channel_id = ?3, name_template = ?4,
+                                 addition_suffix = ?5, artist = ?6, content_date = ?7,
+                                 description = ?8, output_dir = ?9
+             WHERE id = ?1",
+            params![
+                id,
+                program.short_name,
+                program.channel_id,
+                program.name_template,
+                program.addition_suffix,
+                program.artist,
+                program.content_date,
+                program.description,
+                program.output_dir,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Makes a stream part of a program.
     pub fn link_stream_to_program(
         &self,
