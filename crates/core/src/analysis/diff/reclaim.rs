@@ -9,10 +9,16 @@ use super::edges::EdgeComparison;
 use super::{
     DiffConfig, Found, Region, RegionClass, Span, VersionCycle, Window, circular_distance, same_key,
 };
+use std::iter::successors;
 
 /// How far an edge of new audio moves to the silence between two videos, in seconds. Edges land
 /// within about half a window of the truth.
 const EDGE_REACH: f64 = 40.0;
+/// Audio compared at a time when walking an edge into new audio, in seconds. Too short to hide a
+/// change, and long enough that the level alone tells unrelated audio apart.
+const WALK_SECONDS: f64 = 20.0;
+/// How far an edge moves at a time, in seconds.
+const WALK_STEP: f64 = 5.0;
 
 /// A matched neighbour of a new region.
 #[derive(Clone, Copy)]
@@ -34,6 +40,28 @@ impl Neighbour<'_> {
             match_start: Some(self.comparison.earlier_time(start, end - start)),
             ..self.region
         }
+    }
+
+    /// Walks forward from the start of new audio for as long as it matches here. Returns the
+    /// start of what stays new.
+    fn walk_forward(&self, (start, end): (f64, f64)) -> f64 {
+        let fits = |time: f64| time + WALK_SECONDS <= end;
+        let holds = |time: f64| fits(time) && self.holds((time, time + WALK_SECONDS));
+        let matched = successors(Some(start), |time| Some(time + WALK_STEP))
+            .take_while(|time| holds(*time))
+            .last();
+        matched.map_or(start, |time| time + WALK_SECONDS)
+    }
+
+    /// Walks back from the end of new audio for as long as it matches here. Returns the end of
+    /// what stays new.
+    fn walk_back(&self, (start, end): (f64, f64)) -> f64 {
+        let fits = |time: f64| time - WALK_SECONDS >= start;
+        let holds = |time: f64| fits(time) && self.holds((time - WALK_SECONDS, time));
+        let matched = successors(Some(end), |time| Some(time - WALK_STEP))
+            .take_while(|time| holds(*time))
+            .last();
+        matched.map_or(end, |time| time - WALK_SECONDS)
     }
 }
 
@@ -86,15 +114,59 @@ pub(super) fn reclaim_videos<'a>(
             result.push(*region);
             continue;
         }
-        result.extend(claims.iter().zip(&pieces).map(|(claim, piece)| {
-            claim.unwrap_or(Region {
-                start: piece.0,
-                end: piece.1,
-                ..*region
+        let parts: Vec<Region> = claims
+            .iter()
+            .zip(&pieces)
+            .map(|(claim, piece)| {
+                claim.unwrap_or(Region {
+                    start: piece.0,
+                    end: piece.1,
+                    ..*region
+                })
             })
-        }));
+            .collect();
+        result.extend(if is_replacement {
+            parts
+        } else {
+            walk_edges(parts, before, after)
+        });
     }
     snap_edges(&result, current, config)
+}
+
+/// Gives the neighbours what still matches at the ends of the new audio. Between two videos with
+/// no silence, nothing has split the stretch, and flat audio correlates too poorly to place an
+/// edge, so it is compared in short blocks at the neighbour's shift.
+fn walk_edges(
+    parts: Vec<Region>,
+    before: Option<Neighbour<'_>>,
+    after: Option<Neighbour<'_>>,
+) -> Vec<Region> {
+    let is_new = |part: &Region| part.class == RegionClass::New;
+    let (Some(first), Some(last)) = (
+        parts.iter().position(is_new),
+        parts.iter().rposition(is_new),
+    ) else {
+        return parts;
+    };
+    let mut walked = parts;
+    if let Some(side) = after {
+        let span = (walked[last].start, walked[last].end);
+        let end = side.walk_back(span);
+        if end < span.1 {
+            walked[last].end = end;
+            walked.insert(last + 1, side.claim((end, span.1)));
+        }
+    }
+    if let Some(side) = before {
+        let span = (walked[first].start, walked[first].end);
+        let start = side.walk_forward(span);
+        if start > span.0 {
+            walked[first].start = start;
+            walked.insert(first, side.claim((span.0, start)));
+        }
+    }
+    walked
 }
 
 /// Moves each edge between new and matched audio to a silence nearby, as videos change there.

@@ -30,6 +30,8 @@ const VERSION_1031_PERIOD: f64 = 42_244.7;
 const INSERTION: f64 = 727.6;
 const ADDITION_A: f64 = 455.0;
 const ADDITION_B: f64 = 3_414.0;
+/// Addition B took the place of this much old audio. Addition A replaced nothing.
+const DELETED_FOR_ADDITION_B: f64 = 716.0;
 
 fn envelope(name: &str) -> Option<Vec<f32>> {
     let fixtures = dalsegno_test_support::fixtures_dir()?;
@@ -181,6 +183,19 @@ fn comparison_finds_both_additions_of_10_31() {
     };
     assert!(near(ADDITION_A), "{:?}", diff.shift_changes);
     assert!(near(ADDITION_B), "{:?}", diff.shift_changes);
+    let addition_a = diff
+        .regions
+        .iter()
+        .find(|region| region.class == RegionClass::New)
+        .expect("addition A");
+    assert_near(addition_a.end - addition_a.start, ADDITION_A, 15.0);
+    let deleted: f64 = diff
+        .regions
+        .iter()
+        .filter(|region| region.class == RegionClass::Deleted)
+        .map(|region| region.end - region.start)
+        .sum();
+    assert_near(deleted, DELETED_FOR_ADDITION_B, 15.0);
     assert!(
         diff.regions
             .iter()

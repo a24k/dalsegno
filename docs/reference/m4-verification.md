@@ -24,6 +24,27 @@ from 11 agreeing edges. The operator measured 37,649.067 s by hand, 0.37 s longe
 from audio. Candidates at the same boundary rank black and silence together first, and every
 keyframe offered is a stored fragment start.
 
+## Edges against a cut
+
+The 10/31 regions of `compare` were checked against the hand cut, the frames at each edge, and
+the envelopes at a fixed shift.
+
+| Edge | Silence there | Off by |
+| --- | --- | --- |
+| Start of addition A | Yes | Under 2 s |
+| End of addition A | No | About 5 s, was about 165 s |
+| Start of addition B | Yes | About 2 s |
+| Start of the copy inside addition B | Yes | About 5 s |
+| End of that copy | Yes | Under 1 s |
+| End of addition B | Yes | About 0.4 s |
+
+The end of addition A was found 165 s late, with a false deletion of the same length. Flat audio
+followed it with no silence, so correlation could not place the edge and nothing split the
+stretch, and the period change still added up. Edges of a change now walk into new audio in
+20-second blocks at the neighbour's shift. Replacement trials are unchanged, line for line.
+
+The cut holds this copy as well: its 394 s also still play at their old place in the loop.
+
 ## Safety
 
 | Check | Where |
@@ -51,5 +72,5 @@ is left out. An early version of them started the real yt-dlp for an invented vi
 - **Disk floor.** `ensure-range` does not yet refuse a range that would cross it.
 - **Description.** `info.json` comes from the stored stream, so it holds only what `add` stored,
   and the description comes from `program` or `--description`.
-- Silences between videos (D-30) still have no ground truth. The cut boundaries here came from a
-  person, and comparing them with the silences of `compare` remains to be done.
+- Silences between videos (D-30) were compared at these six edges only, on one stream. Five of
+  the six sit on a silence, so an edge between videos can have none.
