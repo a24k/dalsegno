@@ -1,5 +1,6 @@
 //! Adapters for external tools and services.
 
+pub mod api;
 pub mod ffmpeg;
 pub mod fragments;
 pub mod http;

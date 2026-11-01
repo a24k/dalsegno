@@ -46,8 +46,17 @@ SSE events are `job.progress`, `stream.state`, `change.updated`.
 ## CLI
 
 `dalsegno serve` runs the service. `DALSEGNO_URL` selects it, with `http://127.0.0.1:8737` as
-default. Output is
-human-readable by default, or `--json` for scripts.
+default. Output is human-readable by default, or `--json` for scripts.
+
+So far `status`, `jobs`, `changes`, `start` and `stop` go through the service, and need it running:
+
+```text
+dalsegno status
+dalsegno jobs
+dalsegno changes
+dalsegno start <id>
+dalsegno stop  <id>
+```
 
 Offline commands read files and never need the service (FR-N11). Passing `--env` selects
 offline mode; otherwise `scan` and `diff` call the API:
@@ -68,8 +77,6 @@ Until milestone 5 these commands run in process (D-17). All but `doctor` and `pr
 dalsegno doctor   [--stream <id>]
 dalsegno probe    <id>
 dalsegno add      <id>
-dalsegno start    <id>
-dalsegno stop     <id>
 dalsegno fetch    <id> --itag <n> --first <sq> --last <sq> [--output <file>]
 dalsegno backfill <id> [--hours <n>]
 dalsegno features <id>
