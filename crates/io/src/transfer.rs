@@ -49,6 +49,9 @@ pub enum TransferError {
     /// The file system refused.
     #[error("{0}")]
     Io(#[from] io::Error),
+    /// The library root is missing, as with an unmounted volume, and it is never created.
+    #[error("the library {0} does not exist")]
+    NoLibrary(PathBuf),
     /// The target lies outside the library.
     #[error("the target {0} is outside the library")]
     OutsideLibrary(PathBuf),
@@ -66,6 +69,9 @@ pub fn transfer(job: &Transfer) -> Result<TransferOutcome, TransferError> {
         .target
         .parent()
         .ok_or_else(|| TransferError::OutsideLibrary(job.target.clone()))?;
+    if !job.library.exists() {
+        return Err(TransferError::NoLibrary(job.library.clone()));
+    }
     let library = fs::canonicalize(&job.library)?;
     let name = job
         .target
@@ -190,6 +196,22 @@ mod tests {
                 ownership: OWNERSHIP,
             },
         }
+    }
+
+    #[test]
+    fn a_missing_library_is_named_and_not_created() {
+        let fixture = fixture();
+        fs::remove_dir(&fixture.job.library).unwrap();
+
+        let error = transfer(&fixture.job).unwrap_err();
+
+        assert!(matches!(error, TransferError::NoLibrary(_)));
+        assert!(
+            error
+                .to_string()
+                .contains(&*fixture.job.library.to_string_lossy())
+        );
+        assert!(!fixture.job.library.exists());
     }
 
     #[test]
