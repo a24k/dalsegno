@@ -259,11 +259,11 @@ impl Database {
         )?)
     }
 
-    /// Returns when a job of this kind was last queued.
-    pub fn last_job_at(&self, kind: &str) -> Result<Option<i64>, StoreError> {
+    /// Returns when this job was last queued.
+    pub fn last_job_at(&self, kind: &str, target: &str) -> Result<Option<i64>, StoreError> {
         Ok(self.connection.query_row(
-            "SELECT MAX(created_at) FROM jobs WHERE kind = ?1",
-            params![kind],
+            "SELECT MAX(created_at) FROM jobs WHERE kind = ?1 AND target = ?2",
+            params![kind, target],
             |row| row.get(0),
         )?)
     }
@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn the_last_job_of_a_kind_is_found() {
         let database = database();
-        assert_eq!(database.last_job_at("sweep").unwrap(), None);
+        assert_eq!(database.last_job_at("sweep", "{}").unwrap(), None);
         database
             .enqueue_job(&job("sweep", JobClass::Cpu), 4)
             .unwrap();
@@ -480,7 +480,8 @@ mod tests {
             .enqueue_job(&job("sweep", JobClass::Cpu), 8)
             .unwrap();
 
-        assert_eq!(database.last_job_at("sweep").unwrap(), Some(8));
+        assert_eq!(database.last_job_at("sweep", "{}").unwrap(), Some(8));
+        assert_eq!(database.last_job_at("sweep", "{\"a\":1}").unwrap(), None);
     }
 
     #[test]

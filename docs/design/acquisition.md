@@ -81,7 +81,7 @@ start or resume:
 
 loop:
   fetch follow_sq, record head headers
-  on success, advance follow_sq in the same transaction as the fragment row
+  on success, advance follow_sq, just after the fragment row
   if follow_sq falls too far behind: record a gap, jump to head
 ```
 
@@ -90,8 +90,13 @@ no timer ([spike S1](../reference/m0-spikes.md#s1-origin-behaviour-around-the-he
 request timeout is 30 s, several fragment durations. Head samples are stored at most once a
 minute.
 
-If the head does not advance, or yt-dlp reports the stream finished, the supervisor
-confirms over a few attempts before moving to `ended`.
+A crash between the row and `follow_sq` costs nothing, as a stored fragment is skipped.
+
+A head that stands still is not an end, as the origin can stall. After three failed fetches in a
+row, yt-dlp is asked about the stream. Only three "unavailable" answers in a row, a minute apart,
+move it to `ended`, which cannot be undone. Any other failure moves it to `error`, and the
+supervisor tries again after 30 s, doubling to 10 minutes, so an outage does not stop a stream for
+good.
 
 ## Backfill, gaps and range fetches
 
