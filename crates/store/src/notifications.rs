@@ -17,7 +17,7 @@ pub struct Notification {
 }
 
 /// A change whose DVR deadline is near.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeadlineChange {
     /// Row ID.
     pub id: i64,
