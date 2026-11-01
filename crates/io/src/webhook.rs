@@ -46,10 +46,12 @@ pub struct Webhook {
 }
 
 impl Webhook {
-    /// Addresses a webhook.
+    /// Addresses a webhook. Redirects are not followed, as the page at the end of one can
+    /// answer 200 for a message nobody received.
     pub fn new(url: Redacted<String>, format: WebhookFormat) -> Result<Self, WebhookError> {
         let client = reqwest::Client::builder()
             .timeout(TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| WebhookError::Unreachable)?;
         Ok(Self {
@@ -134,6 +136,27 @@ mod tests {
         let sent = hook(&server, WebhookFormat::Slack).send("hello").await;
 
         assert_eq!(sent, Err(WebhookError::Status(503)));
+    }
+
+    // A proxy in front of a webhook can redirect to its login page, which answers 200.
+    #[tokio::test]
+    async fn a_redirect_is_not_a_delivery() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/login", server.uri())),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let sent = hook(&server, WebhookFormat::Slack).send("hello").await;
+
+        assert_eq!(sent, Err(WebhookError::Status(302)));
     }
 
     #[tokio::test]
