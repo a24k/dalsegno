@@ -5,7 +5,10 @@ use std::path::Path;
 use std::time::Duration;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const MIGRATIONS: [&str; 1] = [include_str!("../migrations/0001_initial.sql")];
+const MIGRATIONS: [&str; 2] = [
+    include_str!("../migrations/0001_initial.sql"),
+    include_str!("../migrations/0002_change_tracking.sql"),
+];
 const MIGRATION_COUNT: i64 = MIGRATIONS.len() as i64;
 
 /// Why a database operation failed.
