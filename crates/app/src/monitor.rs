@@ -6,6 +6,7 @@
 use crate::error::AcquireError;
 use crate::fetch::{SharedDatabase, lock};
 use crate::lifecycle::PrefetchTarget;
+use crate::notify::CHANGE;
 use dalsegno_core::analysis::{
     Diff, DiffConfig, LagRun, PeriodConfig, PeriodEstimate, Prepared, Region, RunKind, Series,
     Signal, TrackConfig, VersionCycle, compare, detect_signals, estimate_period, lag_bounds,
@@ -299,7 +300,7 @@ impl Pass<'_> {
             dvr_deadline_at: self.now + DVR_MS - age_ms,
         };
         let body = to_json(&json!({
-            "stream": self.row.stream.video_id,
+            "stream": self.row.stream.title,
             "started_at": seen.first,
             "delta": change.delta,
             "dvr_deadline_at": change.dvr_deadline_at,
@@ -307,7 +308,7 @@ impl Pass<'_> {
         database.atomically(|database| {
             let id = database.insert_change(&change)?;
             let subject = format!("change:{id}:provisional");
-            database.enqueue_notification("change", &subject, &body, self.now)?;
+            database.enqueue_notification(CHANGE, &subject, &body, self.now)?;
             queue_prefetch(database, self.row, id, seen, self.now)?;
             Ok::<_, AcquireError>(id)
         })
@@ -332,7 +333,7 @@ impl Pass<'_> {
         let checks = to_json(&closing.diff.checks)?;
         let boundaries = to_json(&closing.diff.video_boundaries)?;
         let body = to_json(&json!({
-            "stream": self.row.stream.video_id,
+            "stream": self.row.stream.title,
             "old_period": old.period,
             "new_period": closing.period,
             "regions": regions.len(),
@@ -358,7 +359,7 @@ impl Pass<'_> {
                 regions,
             })?;
             let subject = format!("change:{}:confirmed", change.id);
-            database.enqueue_notification("change", &subject, &body, now)?;
+            database.enqueue_notification(CHANGE, &subject, &body, now)?;
             hold_cycle(database, row, new_version, closing.start, closing.period)
         })?;
         Ok(Some(change.id))

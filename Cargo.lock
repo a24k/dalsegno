@@ -367,7 +367,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dalsegno-app",
+ "dalsegno-io",
  "dalsegno-store",
+ "serde_json",
  "tokio",
  "tracing",
 ]

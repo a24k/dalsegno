@@ -3,10 +3,13 @@
 //! The database says what should run, so a restart resumes every stream (FR-S5), and a `stop`
 //! from any process reaches its task at the next look.
 
+use crate::runner::now_ms;
 use dalsegno_app::fetch::{SharedDatabase, lock};
 use dalsegno_app::follow::FollowEnd;
+use dalsegno_app::notify::STREAM;
 use dalsegno_store::database::{Database, StoreError};
 use dalsegno_store::streams::{StreamRow, StreamState};
+use serde_json::json;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
@@ -69,14 +72,44 @@ fn record_end(
     id: i64,
     state: StreamState,
     reason: &str,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
     let is_active = database
         .stream_state(id)?
         .is_some_and(|(current, _)| ACTIVE.contains(&current));
     if is_active {
         database.set_stream_state(id, state, Some(reason))?;
     }
-    Ok(())
+    Ok(is_active)
+}
+
+/// Records how a task ended, with its notification. An outage alerts once, not on every retry.
+fn record_with_notice(
+    database: &Database,
+    id: i64,
+    state: StreamState,
+    reason: &str,
+    subject: &str,
+    should_notify: bool,
+) -> Result<(), StoreError> {
+    database.atomically(|database| {
+        let changed = record_end(database, id, state, reason)?;
+        if changed && should_notify {
+            let title = database.stream(id)?.map(|row| row.stream.title);
+            let body = json!({
+                "stream": title,
+                "message": format!("{}: {reason}", state_words(state)),
+            });
+            database.enqueue_notification(STREAM, subject, &body.to_string(), now_ms())?;
+        }
+        Ok(())
+    })
+}
+
+fn state_words(state: StreamState) -> &'static str {
+    match state {
+        StreamState::Ended => "the stream has ended",
+        _ => "following failed, and is being retried",
+    }
 }
 
 impl Supervisor {
@@ -155,13 +188,25 @@ impl Supervisor {
         let database = lock(&self.database).map_err(|error| error.to_string())?;
         let recorded = match &outcome {
             Ok(FollowEnd::Stopped) => Ok(()),
-            Ok(FollowEnd::Ended(reason)) => record_end(&database, id, StreamState::Ended, reason),
+            Ok(FollowEnd::Ended(reason)) => {
+                let subject = format!("stream:{id}:ended");
+                record_with_notice(&database, id, StreamState::Ended, reason, &subject, true)
+            }
             Err(reason) => {
                 tracing::warn!(id, reason, "following failed");
                 let failures = self.retries.get(&id).map_or(0, |retry| retry.failures) + 1;
                 let at = Instant::now() + delay_after(self.retry_base, failures);
                 self.retries.insert(id, Retry { failures, at });
-                record_end(&database, id, StreamState::Error, reason)
+                let subject = format!("stream:{id}:error:{}", now_ms());
+                let is_first = failures == 1;
+                record_with_notice(
+                    &database,
+                    id,
+                    StreamState::Error,
+                    reason,
+                    &subject,
+                    is_first,
+                )
             }
         };
         recorded.map_err(|error| error.to_string())
@@ -382,6 +427,53 @@ mod tests {
         until(|| follower.started.load(Ordering::SeqCst) == 1).await;
         stop.send(true).unwrap();
         running.await.unwrap();
+    }
+
+    fn notices(database: &SharedDatabase) -> usize {
+        lock(database)
+            .unwrap()
+            .pending_notifications(10)
+            .unwrap()
+            .len()
+    }
+
+    #[tokio::test]
+    async fn a_failing_stream_alerts_once_however_often_it_retries() {
+        let (database, id) = database_with_stream(StreamState::Recording);
+        let follower = Arc::new(Scripted::default());
+        follower.ends.lock().unwrap().extend([
+            Err("offline".to_string()),
+            Err("offline".to_string()),
+            Err("offline".to_string()),
+        ]);
+        let (stop, shutdown) = watch::channel(false);
+        let running = tokio::spawn(supervisor(&database, &follower).run(shutdown));
+
+        until(|| follower.started.load(Ordering::SeqCst) >= 4).await;
+        stop.send(true).unwrap();
+        running.await.unwrap();
+
+        assert_eq!(notices(&database), 1);
+        assert_eq!(state(&database, id).0, StreamState::Backfilling);
+    }
+
+    #[tokio::test]
+    async fn a_finished_stream_is_announced() {
+        let (database, id) = database_with_stream(StreamState::Recording);
+        let follower = Arc::new(Scripted::default());
+        follower
+            .ends
+            .lock()
+            .unwrap()
+            .push(Ok(FollowEnd::Ended("has ended".to_string())));
+        let (stop, shutdown) = watch::channel(false);
+        let running = tokio::spawn(supervisor(&database, &follower).run(shutdown));
+
+        until(|| state(&database, id).0 == StreamState::Ended).await;
+        stop.send(true).unwrap();
+        running.await.unwrap();
+
+        assert_eq!(notices(&database), 1);
     }
 
     #[tokio::test]

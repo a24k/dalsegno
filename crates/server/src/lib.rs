@@ -6,8 +6,10 @@ use dalsegno_app::config::Config;
 use dalsegno_app::lifecycle::{
     ANALYSIS, BACKFILL, FEATURES, PREFETCH, PrefetchTarget, StreamTarget,
 };
+use dalsegno_io::webhook::Webhook;
 use dalsegno_store::jobs::JobRow;
 use dalsegno_store::streams::StreamRow;
+use notifier::Notifier;
 use runner::{JobFuture, JobHandler, JobRunner};
 use scheduler::{SWEEP, run_scheduler};
 use std::sync::Arc;
@@ -15,6 +17,7 @@ use supervisor::{FollowFuture, Follower, Supervisor};
 use tokio::signal;
 use tokio::sync::watch;
 
+pub mod notifier;
 pub mod runner;
 pub mod scheduler;
 pub mod supervisor;
@@ -92,6 +95,16 @@ pub async fn serve(config: &Config, policy: IpPolicy) -> anyhow::Result<()> {
     let (stop, shutdown) = watch::channel(false);
     let jobs = tokio::spawn(runner.run(shutdown.clone()));
     let schedule = tokio::spawn(run_scheduler(database.clone(), shutdown.clone()));
+    let notices = config
+        .webhook
+        .clone()
+        .map(|url| Webhook::new(url, config.webhook_format))
+        .transpose()?
+        .map(|hook| {
+            let notifier =
+                Notifier::new(database.clone(), Arc::new(hook), config.public_url.clone());
+            tokio::spawn(notifier.run(shutdown.clone()))
+        });
     let streams = tokio::spawn(Supervisor::new(database, service).run(shutdown));
     signal::ctrl_c().await?;
     tracing::info!("service stopping");
@@ -99,5 +112,8 @@ pub async fn serve(config: &Config, policy: IpPolicy) -> anyhow::Result<()> {
     streams.await?;
     jobs.await?;
     schedule.await?;
+    if let Some(notices) = notices {
+        notices.await?;
+    }
     Ok(())
 }
