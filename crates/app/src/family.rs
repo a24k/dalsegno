@@ -111,7 +111,16 @@ impl FamilyController {
     }
 
     /// Records an origin-wide failure of the active family (D-26).
-    pub fn on_origin_failure(&mut self, now: u64, reason: SwitchReason) -> Transition {
+    pub fn on_origin_failure(
+        &mut self,
+        failed: IpFamily,
+        now: u64,
+        reason: SwitchReason,
+    ) -> Transition {
+        // A failure that was under way when another moved on says nothing about this family.
+        if failed != self.active {
+            return Transition::Switched(self.active);
+        }
         match self.fallback() {
             Some(fallback) if self.active != fallback => {
                 self.switch_to(fallback, now, reason);
@@ -158,8 +167,22 @@ mod tests {
 
     fn switched() -> FamilyController {
         let mut controller = FamilyController::new(IpPolicy::V6First, true);
-        controller.on_origin_failure(NOW, SwitchReason::BotCheck);
+        controller.on_origin_failure(controller.active(), NOW, SwitchReason::BotCheck);
         controller
+    }
+
+    // Following and backfill can both fail on one family, one after the other.
+    #[test]
+    fn a_late_failure_of_the_family_already_left_changes_nothing() {
+        let mut controller = switched();
+        let avoid_until = controller.avoid_until;
+
+        let transition =
+            controller.on_origin_failure(IpFamily::V6, NOW + 3, SwitchReason::BotCheck);
+
+        assert_eq!(transition, Transition::Switched(IpFamily::V4));
+        assert_eq!(controller.active(), IpFamily::V4);
+        assert_eq!(controller.avoid_until, avoid_until);
     }
 
     #[test]
@@ -177,7 +200,8 @@ mod tests {
     fn failure_moves_to_the_fallback_and_records_why() {
         let mut controller = FamilyController::new(IpPolicy::V6First, true);
 
-        let transition = controller.on_origin_failure(NOW, SwitchReason::PersistentRefusal);
+        let transition =
+            controller.on_origin_failure(controller.active(), NOW, SwitchReason::PersistentRefusal);
 
         assert_eq!(transition, Transition::Switched(IpFamily::V4));
         assert_eq!(
@@ -195,7 +219,8 @@ mod tests {
     fn v4_first_swaps_the_roles() {
         let mut controller = FamilyController::new(IpPolicy::V4First, true);
 
-        let transition = controller.on_origin_failure(NOW, SwitchReason::BotCheck);
+        let transition =
+            controller.on_origin_failure(controller.active(), NOW, SwitchReason::BotCheck);
 
         assert_eq!(transition, Transition::Switched(IpFamily::V6));
         assert!(controller.probe_due(NOW + BASE_AVOIDANCE_SECONDS));
@@ -205,7 +230,8 @@ mod tests {
     fn failure_on_the_fallback_is_exhausted() {
         let mut controller = switched();
 
-        let transition = controller.on_origin_failure(NOW, SwitchReason::BotCheck);
+        let transition =
+            controller.on_origin_failure(controller.active(), NOW, SwitchReason::BotCheck);
 
         assert_eq!(transition, Transition::Exhausted);
         assert_eq!(controller.active(), IpFamily::V4);
@@ -216,7 +242,8 @@ mod tests {
         for policy in [IpPolicy::V6Only, IpPolicy::V4Only] {
             let mut controller = FamilyController::new(policy, true);
 
-            let transition = controller.on_origin_failure(NOW, SwitchReason::BotCheck);
+            let transition =
+                controller.on_origin_failure(controller.active(), NOW, SwitchReason::BotCheck);
 
             assert_eq!(transition, Transition::Exhausted);
             assert_eq!(controller.last_switch(), None);
@@ -228,7 +255,8 @@ mod tests {
         for policy in [IpPolicy::V6First, IpPolicy::V4First] {
             let mut controller = FamilyController::new(policy, false);
 
-            let transition = controller.on_origin_failure(NOW, SwitchReason::BotCheck);
+            let transition =
+                controller.on_origin_failure(controller.active(), NOW, SwitchReason::BotCheck);
 
             assert_eq!(transition, Transition::Exhausted);
             assert!(!controller.probe_due(u64::MAX));
@@ -282,7 +310,7 @@ mod tests {
         controller.on_probe_result(NOW, false);
         controller.on_probe_result(NOW, true);
 
-        controller.on_origin_failure(NOW, SwitchReason::BotCheck);
+        controller.on_origin_failure(controller.active(), NOW, SwitchReason::BotCheck);
 
         assert!(controller.probe_due(NOW + BASE_AVOIDANCE_SECONDS));
     }

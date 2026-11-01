@@ -150,7 +150,7 @@ impl<R: Resolver> Session<R> {
         if lease.generation != state.generation {
             return Ok(());
         }
-        self.strike(&mut state).await
+        self.strike(&mut state, lease.family).await
     }
 
     /// Reports an empty 200, which counts towards a refusal once it repeats.
@@ -164,7 +164,7 @@ impl<R: Resolver> Session<R> {
             return Ok(());
         }
         state.empties = 0;
-        self.strike(&mut state).await
+        self.strike(&mut state, lease.family).await
     }
 
     /// Reports a served fragment, which clears the failure ladder.
@@ -176,21 +176,28 @@ impl<R: Resolver> Session<R> {
         }
     }
 
-    async fn strike(&self, state: &mut State) -> Result<(), AcquireError> {
+    async fn strike(&self, state: &mut State, failed: IpFamily) -> Result<(), AcquireError> {
         state.strikes += 1;
         state.held = None;
         state.generation += 1;
         if state.strikes >= STRIKES_BEFORE_SWITCH {
-            self.switch_family(SwitchReason::PersistentRefusal).await?;
+            self.switch_family(failed, SwitchReason::PersistentRefusal)
+                .await?;
         }
         Ok(())
     }
 
-    async fn switch_family(&self, reason: SwitchReason) -> Result<(), AcquireError> {
+    async fn switch_family(
+        &self,
+        failed: IpFamily,
+        reason: SwitchReason,
+    ) -> Result<(), AcquireError> {
         let mut family = self.family.lock().await;
-        match family.on_origin_failure((self.clock)(), reason) {
+        match family.on_origin_failure(failed, (self.clock)(), reason) {
             Transition::Switched(to) => {
-                tracing::warn!(stream = %self.video, itag = self.itag, %to, ?reason, "switched IP family");
+                if to != failed {
+                    tracing::warn!(stream = %self.video, itag = self.itag, %to, ?reason, "switched IP family");
+                }
                 Ok(())
             }
             Transition::Exhausted => Err(AcquireError::FamilyExhausted(family.active())),
@@ -210,7 +217,9 @@ impl<R: Resolver> Session<R> {
                         resolved_at: (self.clock)(),
                     });
                 }
-                Err(ResolveError::BotCheck) => self.switch_family(SwitchReason::BotCheck).await?,
+                Err(ResolveError::BotCheck) => {
+                    self.switch_family(family, SwitchReason::BotCheck).await?;
+                }
                 Err(ResolveError::Unavailable(message)) => {
                     return Err(AcquireError::Unavailable(message));
                 }
