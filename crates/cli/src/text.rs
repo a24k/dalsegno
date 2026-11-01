@@ -115,7 +115,11 @@ pub(crate) fn diff_text(report: &Diff) -> String {
             check.name, check.expected, check.actual
         )
     });
-    regions.chain(checks).collect()
+    let boundaries = report
+        .video_boundaries
+        .iter()
+        .map(|time| format!("video boundary at {time:.1}\n"));
+    regions.chain(boundaries).chain(checks).collect()
 }
 
 fn or_none(value: Option<&str>) -> &str {

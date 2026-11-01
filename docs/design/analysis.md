@@ -155,6 +155,9 @@ Baseline, from measured-facts section 4.5:
 | deleted | Region of the previous version with no counterpart. |
 | no data | Silence or a recording gap between different shifts. Never counted as inserted (D-05). |
 
+The silences inside new regions are reported as video boundaries, as one region can join several
+videos (FR-N13, D-31). Silences within 5 s of a region's edge belong to the edge.
+
 The window search is rayon-parallel, using one FFT plan per thread.
 
 ## Self-checks
@@ -165,6 +168,9 @@ pub struct SelfCheck { name: String, expected: f64, actual: f64, tolerance: f64,
 
 - Sum of shift changes equals the period change.
 - Inserted (new, revival and known regions) minus deleted equals the period change.
+- The silences between videos in existing regions recur at the matched shift. At most 10% may be
+  missing, and audio with no silences gives no check. Silences come from the level alone, so unlike
+  the other two this does not rest on region lengths. It does not find changes (D-30).
 
 Tolerance starts at 5 s (the known example is off by 1 s). Lengths depend on region edges, each
 good to about 3 s, so the second check allows at least 3 s per edge. A failure asks for human
