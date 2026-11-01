@@ -11,15 +11,16 @@ use dalsegno_app::export::{
     PlexTarget, PublishRequest, Redacted, TagEdits, find_tools,
 };
 use dalsegno_app::offline::{self, DiffRequest};
+use dalsegno_app::remote::ApiClient;
 use serde::Serialize;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use text::{
     add_text, backfill_text, candidates_text, cut_text, diff_text, doctor_text, features_text,
     fetch_text, period_text, probe_text, publish_text, refine_text, scan_text, sweep_text,
 };
 use tracing_subscriber::filter::LevelFilter;
 
+mod remote;
 mod text;
 
 /// Command-line interface for dalsegno.
@@ -43,6 +44,14 @@ struct Cli {
     /// Directory that holds the database and fragments.
     #[arg(long, global = true, env = "DALSEGNO_DATA")]
     data_dir: Option<PathBuf>,
+    /// Address of the running service.
+    #[arg(
+        long,
+        global = true,
+        env = "DALSEGNO_URL",
+        default_value = "http://127.0.0.1:8737"
+    )]
+    url: String,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -51,6 +60,12 @@ struct Cli {
 enum Command {
     /// Run the service until it is stopped.
     Serve,
+    /// Show the streams of the running service.
+    Status,
+    /// Show the newest jobs of the running service.
+    Jobs,
+    /// Show the newest changes of the running service.
+    Changes,
     /// Start following a stream, and filling what it missed.
     Start {
         /// Video ID or URL.
@@ -295,14 +310,22 @@ impl From<CutKind> for ExportKind {
     }
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis() as i64)
-}
-
-fn state_text(state: &String) -> String {
-    format!("{state}\n")
+/// Runs what goes through the service, and hands back what does not.
+async fn run_remote(command: Command, url: &str, json: bool) -> anyhow::Result<Option<Command>> {
+    let client = || ApiClient::new(url);
+    match command {
+        Command::Status => remote::status(&client()?, json).await?,
+        Command::Jobs => remote::jobs(&client()?, json).await?,
+        Command::Changes => remote::changes(&client()?, json).await?,
+        Command::Start { stream } => {
+            remote::stream_action(&client()?, &stream, "start", json).await?;
+        }
+        Command::Stop { stream } => {
+            remote::stream_action(&client()?, &stream, "stop", json).await?;
+        }
+        other => return Ok(Some(other)),
+    }
+    Ok(None)
 }
 
 fn parse_mode(text: &str) -> Result<u32, String> {
@@ -337,6 +360,10 @@ async fn main() -> anyhow::Result<()> {
         Some(command) => command,
         None => return Ok(()),
     };
+    let command = match run_remote(command, &cli.url, json).await? {
+        Some(command) => command,
+        None => return Ok(()),
+    };
     let acquisition = Acquisition::new(AcquisitionOptions {
         policy: cli.ip_policy,
         cookies: cli.cookies,
@@ -366,14 +393,6 @@ async fn main() -> anyhow::Result<()> {
         Command::Features { stream } => {
             let report = library()?.features(&stream).await?;
             print_report(cli.json, &report, features_text)
-        }
-        Command::Start { stream } => {
-            let state = library()?.start_stream(&stream, now_ms())?;
-            print_report(cli.json, &format!("{state:?}"), state_text)
-        }
-        Command::Stop { stream } => {
-            let state = library()?.stop_stream(&stream)?;
-            print_report(cli.json, &format!("{state:?}"), state_text)
         }
         Command::Sweep => {
             let report = library()?.sweep().await?;
@@ -491,6 +510,12 @@ async fn main() -> anyhow::Result<()> {
         | Command::Scan { .. }
         | Command::Diff { .. }
         | Command::Serve => Ok(()),
+        // `run_remote` has already handled these.
+        Command::Status
+        | Command::Jobs
+        | Command::Changes
+        | Command::Start { .. }
+        | Command::Stop { .. } => Ok(()),
         Command::Fetch {
             stream,
             itag,

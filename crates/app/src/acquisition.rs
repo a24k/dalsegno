@@ -296,6 +296,11 @@ impl Acquisition {
     }
 }
 
+/// Returns the video ID of an ID or URL.
+pub fn video_id_of(input: &str) -> Result<String, AcquireError> {
+    Ok(parse_stream(input)?.to_string())
+}
+
 fn parse_stream(input: &str) -> Result<VideoId, AcquireError> {
     VideoId::parse(input).map_err(|_| AcquireError::InvalidRequest("not a video ID or video URL"))
 }

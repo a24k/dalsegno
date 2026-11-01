@@ -16,5 +16,6 @@ pub mod monitor;
 pub mod notify;
 pub mod offline;
 pub mod probe;
+pub mod remote;
 pub mod retention;
 pub mod session;
