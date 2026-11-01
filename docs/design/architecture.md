@@ -117,9 +117,11 @@ continues, and change detection is off.
 
 ## Configuration
 
-Bootstrap settings come from `~/.config/dalsegno/config.toml` or environment variables
-prefixed `DALSEGNO_`: data, work and library paths, bind address, cookie file, webhook URL,
-Plex URL and token. Operational settings start there and can be overridden in the database:
+Bootstrap settings come from `~/.config/dalsegno/config.toml`, or the file `DALSEGNO_CONFIG`
+names, and from environment variables prefixed `DALSEGNO_`, which win: data and library paths,
+bind address (`127.0.0.1:8737` by default), cookie file, webhook URL, public URL, Plex URL and
+token. The work area sits under the data path. Operational settings will start there and can be
+overridden in the database:
 IP family policy, rate limits, retention, disk floor, analysis thresholds (D-24). Secrets
 are never exposed by `GET /settings`. Per-stream settings live in the database.
 
