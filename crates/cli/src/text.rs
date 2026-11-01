@@ -25,7 +25,12 @@ pub(crate) fn candidates_text(report: &CandidateReport) -> String {
     let ends: String = report
         .ends
         .iter()
-        .map(|end| format!("end at {:.3} ({:?})\n", end.time, end.evidence))
+        .map(|end| {
+            format!(
+                "end at {:.3} ({:?}, {:?})\n",
+                end.time, end.evidence, end.edge
+            )
+        })
         .collect();
     format!(
         "{starts}{ends}contact sheet: {}\n",

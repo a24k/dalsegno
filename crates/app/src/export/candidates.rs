@@ -174,7 +174,7 @@ where
     Ok(CandidateReport {
         around: time,
         starts: start_candidates(&black, &silence, &place.keyframes()),
-        ends: end_candidates(&black, &silence),
+        ends: end_candidates(&black, &silence, place.audio_start + length),
         relaxed,
         contact_sheet,
     })

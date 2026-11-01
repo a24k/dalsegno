@@ -7,8 +7,8 @@ mod naming;
 
 pub use assembly::{CutError, FragmentRange, Piece, check_air_time, plan_cut};
 pub use boundary::{
-    EndCandidate, Evidence, Interval, Keyframe, RefinedPeriod, StartCandidate, end_candidates,
-    parse_black, parse_silence, refine_period, start_candidates,
+    EndCandidate, EndEdge, Evidence, Interval, Keyframe, RefinedPeriod, StartCandidate,
+    end_candidates, parse_black, parse_silence, refine_period, start_candidates,
 };
 pub use info::sanitise_info;
 pub use naming::{

@@ -10,6 +10,9 @@ const KEYFRAME_LEAD_SECONDS: f64 = 5.0;
 const PAIR_TOLERANCE_SECONDS: f64 = 0.05;
 /// How far from the expected period a pair of blacks may lie, in seconds.
 const PERIOD_SEARCH_SECONDS: f64 = 5.0;
+/// How long before the sound returns an end sits, in seconds. By then the next video has begun,
+/// and not one frame of it may get in.
+const RETURN_LEAD_SECONDS: f64 = 0.1;
 
 /// A stretch of a detector's output.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -98,11 +101,23 @@ pub struct StartCandidate {
     pub interval: Interval,
 }
 
+/// Which edge of a silence an end sits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndEdge {
+    /// The sound stops, which is the end of most pieces.
+    SoundStops,
+    /// The sound returns, for a piece that closes in silence, such as on a closing card.
+    SoundReturns,
+}
+
 /// A place a cut can end, which may be any frame.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct EndCandidate {
-    /// Stream time, the moment the sound disappears.
+    /// Stream time.
     pub time: f64,
+    /// Which edge of the silence it is.
+    pub edge: EndEdge,
     /// What it rests on.
     pub evidence: Evidence,
 }
@@ -171,17 +186,32 @@ pub fn start_candidates(
         .collect()
 }
 
-/// Offers the moment the sound stops, so that not one frame of what follows gets in.
-pub fn end_candidates(black: &[Interval], silence: &[Interval]) -> Vec<EndCandidate> {
+/// Offers both edges of each silence, as only a person can tell whether what stays on screen in
+/// silence still belongs to the piece. Silence cut off at `end_of_audio` never returned.
+pub fn end_candidates(
+    black: &[Interval],
+    silence: &[Interval],
+    end_of_audio: f64,
+) -> Vec<EndCandidate> {
     let mut candidates: Vec<EndCandidate> = silence
         .iter()
-        .map(|interval| EndCandidate {
-            time: interval.start,
-            evidence: if black.iter().any(|b| b.overlap(interval).is_some()) {
+        .flat_map(|interval| {
+            let evidence = if black.iter().any(|b| b.overlap(interval).is_some()) {
                 Evidence::Both
             } else {
                 Evidence::SilenceOnly
-            },
+            };
+            let stops = EndCandidate {
+                time: interval.start,
+                edge: EndEdge::SoundStops,
+                evidence,
+            };
+            let returns = (interval.end < end_of_audio).then_some(EndCandidate {
+                time: (interval.end - RETURN_LEAD_SECONDS).max(interval.start),
+                edge: EndEdge::SoundReturns,
+                evidence,
+            });
+            std::iter::once(stops).chain(returns)
         })
         .collect();
     candidates.sort_by(|a, b| a.evidence.cmp(&b.evidence).then(a.time.total_cmp(&b.time)));
@@ -320,25 +350,60 @@ mod tests {
     }
 
     #[test]
-    fn ends_are_the_moments_the_sound_stops() {
+    fn ends_are_where_the_sound_stops_and_where_it_returns() {
         let silence = [interval(10.0, 11.0), interval(30.0, 31.0)];
         let black = [interval(30.5, 32.0)];
 
-        let ends = end_candidates(&black, &silence);
+        let ends = end_candidates(&black, &silence, 60.0);
 
+        let end = |time, edge, evidence| EndCandidate {
+            time,
+            edge,
+            evidence,
+        };
         assert_eq!(
             ends,
             [
-                EndCandidate {
-                    time: 30.0,
-                    evidence: Evidence::Both
-                },
-                EndCandidate {
-                    time: 10.0,
-                    evidence: Evidence::SilenceOnly
-                },
+                end(30.0, EndEdge::SoundStops, Evidence::Both),
+                end(
+                    31.0 - RETURN_LEAD_SECONDS,
+                    EndEdge::SoundReturns,
+                    Evidence::Both
+                ),
+                end(10.0, EndEdge::SoundStops, Evidence::SilenceOnly),
+                end(
+                    11.0 - RETURN_LEAD_SECONDS,
+                    EndEdge::SoundReturns,
+                    Evidence::SilenceOnly
+                ),
             ]
         );
+    }
+
+    #[test]
+    fn an_end_stays_inside_a_very_short_silence() {
+        let ends = end_candidates(&[], &[interval(10.0, 10.05)], 60.0);
+
+        assert!(ends.iter().all(|end| end.time >= 10.0));
+    }
+
+    // A closing card can stay on screen in silence, so the sound stops long before the piece ends.
+    #[test]
+    fn the_end_of_a_silent_closing_card_is_offered() {
+        let ends = end_candidates(&[], &[interval(22.5, 40.1)], 60.0);
+
+        assert!(
+            ends.iter()
+                .any(|end| end.time == 40.1 - RETURN_LEAD_SECONDS)
+        );
+    }
+
+    #[test]
+    fn silence_cut_off_by_the_end_of_the_audio_does_not_return() {
+        let ends = end_candidates(&[], &[interval(50.0, 60.0)], 60.0);
+
+        let times: Vec<f64> = ends.iter().map(|end| end.time).collect();
+        assert_eq!(times, [50.0]);
     }
 
     // The worked example from the measured facts: two blacks, 37,649.067 s apart.

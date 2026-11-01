@@ -592,6 +592,57 @@ fn store_range(library: &Library, fixtures: &Path, itag: u32, first: u64, last: 
     }
 }
 
+/// A piece of the hand cut that closes on a card in silence, as a person judged it. Fragments
+/// around its end, and how far from the start of the cut that end lies.
+const PIECE_END_SQ: u64 = 2_558_703;
+const PIECE_END_REACH: u64 = 8;
+const PIECE_SECONDS: f64 = 3_340.3;
+/// Close enough to leave out the next video, whose first frame comes 0.03 s after this end.
+const PIECE_END_TOLERANCE: f64 = 0.1;
+
+#[tokio::test]
+async fn the_end_of_a_piece_closing_in_silence_is_a_candidate() {
+    require_fixtures!();
+    let fixtures = dalsegno_test_support::fixtures_dir().unwrap();
+    let Some(setup) = setup() else {
+        return;
+    };
+    lock(&setup.library.database)
+        .unwrap()
+        .connection()
+        .execute("UPDATE streams SET fragment_len = 5.0", [])
+        .unwrap();
+    let (first, last) = (
+        PIECE_END_SQ - PIECE_END_REACH,
+        PIECE_END_SQ + PIECE_END_REACH,
+    );
+    store_range(&setup.library, &fixtures, VIDEO_ITAG, first, last);
+    store_range(&setup.library, &fixtures, AUDIO_ITAG, first, last);
+    let bytes = fs::read(
+        fixtures
+            .join("frag-248")
+            .join(HAND_CUT_START_SQ.to_string()),
+    )
+    .unwrap();
+    let truth = read_timing(&bytes).unwrap().start_time + PIECE_SECONDS;
+    let ensure = async |_: &StreamRow, _, _, _| Ok(());
+
+    let report = candidates_with(&setup.library, &setup.tools, STREAM, truth, ensure)
+        .await
+        .unwrap();
+
+    let nearest = report
+        .ends
+        .iter()
+        .map(|end| (end.time - truth).abs())
+        .min_by(f64::total_cmp);
+    assert!(
+        nearest.is_some_and(|distance| distance <= PIECE_END_TOLERANCE),
+        "{:?}",
+        report.ends
+    );
+}
+
 #[tokio::test]
 async fn candidates_from_real_fragments_rank_and_offer_keyframes() {
     require_fixtures!();
