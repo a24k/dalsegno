@@ -39,7 +39,9 @@ fn enqueue_if_due(
 fn enqueue_stream_work(database: &Database, row: &StreamRow, now: i64) -> Result<usize, String> {
     let to_text = |error: StoreError| error.to_string();
     let features = StreamTarget::features(row).map_err(|error| error.to_string())?;
+    let analysis = StreamTarget::analysis(row).map_err(|error| error.to_string())?;
     let mut queued = enqueue_if_due(database, &features, HOUR_MS, now).map_err(to_text)?;
+    queued += enqueue_if_due(database, &analysis, HOUR_MS, now).map_err(to_text)?;
     let has_gaps = !database
         .open_gaps(row.id, row.stream.audio_itag)
         .map_err(to_text)?
@@ -116,14 +118,14 @@ mod tests {
     }
 
     #[test]
-    fn a_recording_stream_gets_its_features_every_hour() {
+    fn a_recording_stream_is_analysed_every_hour() {
         let (database, _) = with_stream(StreamState::Recording);
 
-        assert_eq!(enqueue_due(&database, 0).unwrap(), 2);
+        assert_eq!(enqueue_due(&database, 0).unwrap(), 3);
         finish_all(&database);
 
         assert_eq!(enqueue_due(&database, HOUR_MS - 1).unwrap(), 0);
-        assert_eq!(enqueue_due(&database, HOUR_MS).unwrap(), 1);
+        assert_eq!(enqueue_due(&database, HOUR_MS).unwrap(), 2);
     }
 
     #[test]
@@ -131,7 +133,7 @@ mod tests {
         let (database, id) = with_stream(StreamState::Recording);
         database.add_gap(id, 140, 1, 2).unwrap();
 
-        assert_eq!(enqueue_due(&database, 0).unwrap(), 3);
+        assert_eq!(enqueue_due(&database, 0).unwrap(), 4);
     }
 
     #[test]

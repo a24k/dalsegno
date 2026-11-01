@@ -3,7 +3,9 @@
 use dalsegno_app::acquisition::{Acquisition, AcquisitionOptions, IpPolicy, Library};
 use dalsegno_app::backfill::DEFAULT_HOURS;
 use dalsegno_app::config::Config;
-use dalsegno_app::lifecycle::{BACKFILL, FEATURES, StreamTarget};
+use dalsegno_app::lifecycle::{
+    ANALYSIS, BACKFILL, FEATURES, PREFETCH, PrefetchTarget, StreamTarget,
+};
 use dalsegno_store::jobs::JobRow;
 use dalsegno_store::streams::StreamRow;
 use runner::{JobFuture, JobHandler, JobRunner};
@@ -31,8 +33,13 @@ impl Service {
             let report = self.library.sweep().await;
             return report.map(drop).map_err(|error| error.to_string());
         }
-        let target = StreamTarget::parse(&job.job.target)
-            .ok_or_else(|| format!("the target of job {} is not valid", job.id))?;
+        let invalid = || format!("the target of job {} is not valid", job.id);
+        if kind == PREFETCH {
+            let target = PrefetchTarget::parse(&job.job.target).ok_or_else(invalid)?;
+            let done = self.acquisition.prefetch(&self.library, &target).await;
+            return done.map_err(|error| error.to_string());
+        }
+        let target = StreamTarget::parse(&job.job.target).ok_or_else(invalid)?;
         let stream = target.stream.as_str();
         let done = match kind {
             BACKFILL => self
@@ -41,6 +48,7 @@ impl Service {
                 .await
                 .map(drop),
             FEATURES => self.library.features(stream).await.map(drop),
+            ANALYSIS => self.library.analyse(stream).await.map(drop),
             other => return Err(format!("unknown job kind {other}")),
         };
         done.map_err(|error| error.to_string())

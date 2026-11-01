@@ -109,6 +109,12 @@ stateDiagram-v2
   provisional --> dismissed: operator
 ```
 
+A pass runs hourly as a job, locks the database only to read and to write, and overlaps the last
+pass by an hour, as a signal needs the points before it. A settled lag signals from the start of
+every pass, so only a new delta or later unmatched audio counts as a later signal. The cycle that
+stands for the old version ends 11 minutes before the change, as comparison searches 10 minutes
+past a cycle's ends and would find the new audio there.
+
 Provisional creation enqueues prefetch, sets the DVR deadline and notifies. Confirmation
 creates the version, holds its audio and features, runs diff and self-checks, and notifies
 once more (D-08). Each state change commits together with its outbox row, so a crash can

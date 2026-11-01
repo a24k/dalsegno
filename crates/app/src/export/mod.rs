@@ -17,9 +17,11 @@ pub use publish::{PlexTarget, PublishReport, PublishRequest};
 use crate::acquisition::{Acquisition, Library};
 use crate::error::AcquireError;
 use crate::fetch::{FetchRange, MAX_RANGE_FRAGMENTS, fetch_range, lock};
+use crate::lifecycle::PrefetchTarget;
 use dalsegno_core::export::check_output_dir;
 use dalsegno_io::ffmpeg::Ffmpeg;
 use dalsegno_io::tools::find_program;
+use dalsegno_store::retention::{HoldOwner, NewHold};
 use dalsegno_store::streams::StreamRow;
 use std::sync::Arc;
 
@@ -49,6 +51,29 @@ impl Library {
 }
 
 impl Acquisition {
+    /// Holds and fetches the video around a change (FR-E1). The hold comes first, and a
+    /// repeat of the job only adds a second one, so it is safe to run again.
+    pub async fn prefetch(
+        &self,
+        library: &Library,
+        target: &PrefetchTarget,
+    ) -> Result<(), AcquireError> {
+        let row = library.registered(&target.stream)?;
+        let itag = row
+            .stream
+            .video_itag
+            .ok_or_else(|| AcquireError::NoVideo(row.stream.video_id.clone()))?;
+        lock(&library.database)?.insert_hold(&NewHold {
+            stream_id: row.id,
+            itag,
+            sq_first: target.first,
+            sq_last: target.last,
+            owner: HoldOwner::Change(target.change),
+        })?;
+        self.ensure_range(library, &row, itag, target.first, target.last)
+            .await
+    }
+
     /// Fetches whatever a range lacks on one track, and fails if it left the DVR (FR-E13).
     pub(crate) async fn ensure_range(
         &self,

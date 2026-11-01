@@ -165,6 +165,43 @@ impl Database {
             .collect()
     }
 
+    /// Returns the grid index of the last stored row.
+    pub fn envelope_last_bin(&self, stream_id: i64) -> Result<Option<u64>, StoreError> {
+        let bin: Option<i64> = self.connection.query_row(
+            "SELECT MAX(first_bin) FROM envelope WHERE stream_id = ?1 AND feature = ?2",
+            params![stream_id, ENVELOPE_FEATURE],
+            |row| row.get(0),
+        )?;
+        Ok(bin.map(|bin| bin as u64))
+    }
+
+    /// Returns the rows from a grid index on, in grid order.
+    pub fn envelope_rows_since(
+        &self,
+        stream_id: i64,
+        first_bin: u64,
+    ) -> Result<Vec<EnvelopeRow>, StoreError> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT sq, first_bin, data FROM envelope \
+             WHERE stream_id = ?1 AND feature = ?2 AND first_bin >= ?3 ORDER BY first_bin",
+        )?;
+        let raw: Vec<(i64, i64, Vec<u8>)> = statement
+            .query_map(
+                params![stream_id, ENVELOPE_FEATURE, first_bin as i64],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?
+            .collect::<Result<_, _>>()?;
+        raw.into_iter()
+            .map(|(sq, first_bin, data)| {
+                Ok(EnvelopeRow {
+                    sq: sq as u64,
+                    first_bin: first_bin as u64,
+                    values: decode(&data)?,
+                })
+            })
+            .collect()
+    }
+
     /// Returns the grid index just past the row of `sq`.
     pub fn envelope_end_bin(&self, stream_id: i64, sq: u64) -> Result<Option<u64>, StoreError> {
         let row: Option<(i64, i64)> = self

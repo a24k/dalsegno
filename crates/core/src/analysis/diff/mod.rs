@@ -212,7 +212,7 @@ pub fn compare(
         .map(|span| classify(span, edge(span), versions, known))
         .collect();
     let refined = refine_edges(&classified, &spans, current, versions, config);
-    let mut regions = mark_moved(&refined, versions);
+    let regions = mark_moved(&refined, versions);
     let shift_changes = shift_changes(&regions, versions);
     let deleted = deleted_regions(&regions, versions, config);
     let inserted: f64 = regions
@@ -243,6 +243,7 @@ pub fn compare(
     ];
     checks.extend(silences_recur(&regions, current, versions));
     let video_boundaries = boundaries_inside_new(&regions, current);
+    let mut regions = with_match_starts(&regions, versions);
     regions.extend(deleted);
     Diff {
         regions,
@@ -250,6 +251,26 @@ pub fn compare(
         video_boundaries,
         checks,
     }
+}
+
+/// Sets where each region starts in its version from its shift, as moving an edge leaves the
+/// value from before the move.
+fn with_match_starts(regions: &[Region], versions: &[VersionCycle<'_>]) -> Vec<Region> {
+    regions
+        .iter()
+        .map(|region| {
+            let cycle = versions
+                .iter()
+                .find(|cycle| Some(cycle.id) == region.version);
+            let found = cycle.zip(region.shift).map(|(cycle, shift)| {
+                cycle.start + (region.start - shift - cycle.start).rem_euclid(cycle.period)
+            });
+            Region {
+                match_start: found.or(region.match_start),
+                ..*region
+            }
+        })
+        .collect()
 }
 
 /// Returns the silences of a region, leaving out the ones at its edges. They are found over the

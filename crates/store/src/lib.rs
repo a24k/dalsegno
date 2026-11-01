@@ -1,5 +1,6 @@
 //! SQLite access, migrations and repositories.
 
+pub mod changes;
 pub mod clips;
 pub mod database;
 pub mod features;

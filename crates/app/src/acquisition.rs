@@ -12,6 +12,7 @@ use crate::fetch::{
     fetch_range, lock,
 };
 use crate::follow::{FollowEnd, FollowPolicy, follow};
+use crate::monitor::{MonitorReport, run_pass};
 use crate::probe::{ProbeReport, ProbeTools, probe_stream};
 use crate::retention::{SweepReport, sweep};
 use crate::session::{Clock, Session, system_clock};
@@ -55,6 +56,16 @@ pub struct Library {
 }
 
 impl Library {
+    /// Runs one pass of analysis over a stream.
+    pub async fn analyse(&self, stream: &str) -> Result<MonitorReport, AcquireError> {
+        let row = self.registered(stream)?;
+        let database = Arc::clone(&self.database);
+        let now = system_clock()() as i64 * MILLIS_PER_SECOND;
+        spawn_blocking(move || run_pass(&database, &row, now))
+            .await
+            .map_err(|_| AcquireError::Task)?
+    }
+
     /// Returns the database, for the service's own work.
     pub fn database(&self) -> SharedDatabase {
         Arc::clone(&self.database)
