@@ -159,6 +159,9 @@ The work area is on local disk, and finished output is transferred to the NAS li
   and opens and auto-merges a version bump, CI builds and publishes the image, and Watchtower
   or existing GitOps swaps it in. If URL resolution starts failing before the rebuild lands,
   the stream enters `error` and the notification suggests that update.
+- **Image:** a tag `v1.2.3` runs CD, which runs all of CI and then publishes
+  `ghcr.io/a24k/dalsegno` as `1.2.3`, `1.2` and `latest`. The tag must match `Cargo.toml`. A tag
+  `v1.2.3-rc.1` publishes only `1.2.3-rc.1`. A merge publishes nothing (D-32).
 - **Volumes:** `/data` local disk, `/config` settings and cookie, `/library` NAS.
 - **User:** runs as the library owner's uid:gid.
 - **IPv6:** needs `enable_ipv6` with an address range, or host networking; otherwise IPv4
