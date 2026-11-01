@@ -3,9 +3,11 @@
 use crate::runner::now_ms;
 use dalsegno_app::fetch::{SharedDatabase, lock};
 use dalsegno_app::lifecycle::StreamTarget;
+use dalsegno_app::notify::DEADLINE;
 use dalsegno_store::database::{Database, StoreError};
 use dalsegno_store::jobs::{JobClass, NewJob};
 use dalsegno_store::streams::{StreamRow, StreamState};
+use serde_json::json;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::sleep;
@@ -15,6 +17,7 @@ pub const SWEEP: &str = "sweep";
 
 const HOUR_MS: i64 = 3600 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
+const DEADLINE_WARNING_MS: i64 = 24 * HOUR_MS;
 /// How often the schedule is looked at.
 const TICK: Duration = Duration::from_secs(60);
 
@@ -53,6 +56,16 @@ fn enqueue_stream_work(database: &Database, row: &StreamRow, now: i64) -> Result
     Ok(queued)
 }
 
+/// Warns once about each change whose old version is about to leave the DVR (FR-J3).
+fn warn_of_deadlines(database: &Database, now: i64) -> Result<(), StoreError> {
+    for change in database.changes_near_deadline(now + DEADLINE_WARNING_MS)? {
+        let body = json!({ "stream": change.title, "dvr_deadline_at": change.deadline_at });
+        let subject = format!("change:{}:deadline", change.id);
+        database.enqueue_notification(DEADLINE, &subject, &body.to_string(), now)?;
+    }
+    Ok(())
+}
+
 /// Queues what is due, and returns how many jobs that was.
 fn enqueue_due(database: &Database, now: i64) -> Result<usize, String> {
     let sweep = NewJob {
@@ -61,6 +74,7 @@ fn enqueue_due(database: &Database, now: i64) -> Result<usize, String> {
         target: "{}".to_string(),
     };
     let swept = enqueue_if_due(database, &sweep, DAY_MS, now).map_err(|error| error.to_string())?;
+    warn_of_deadlines(database, now).map_err(|error| error.to_string())?;
     let rows = database
         .streams_in_states(&[StreamState::Backfilling, StreamState::Recording])
         .map_err(|error| error.to_string())?;
@@ -134,6 +148,50 @@ mod tests {
         database.add_gap(id, 140, 1, 2).unwrap();
 
         assert_eq!(enqueue_due(&database, 0).unwrap(), 4);
+    }
+
+    fn with_change(deadline: i64) -> Database {
+        let (database, stream) = with_stream(StreamState::Recording);
+        database
+            .connection()
+            .execute_batch(
+                "INSERT INTO programs (id, short_name, name_template, addition_suffix, output_dir)
+                 VALUES (1, 'a', 'a', 'a', 'a');",
+            )
+            .unwrap();
+        database
+            .connection()
+            .execute(
+                "INSERT INTO changes (program_id, stream_id, detected_at, state, dvr_deadline_at,
+                 start_time, last_signal_time, last_delta)
+                 VALUES (1, ?1, 0, 'confirmed', ?2, 0, 0, 0)",
+                (stream, deadline),
+            )
+            .unwrap();
+        database
+    }
+
+    fn notifications(database: &Database) -> usize {
+        database.pending_notifications(10).unwrap().len()
+    }
+
+    #[test]
+    fn a_near_deadline_is_warned_of_once() {
+        let database = with_change(DEADLINE_WARNING_MS);
+
+        enqueue_due(&database, 0).unwrap();
+        enqueue_due(&database, 60_000).unwrap();
+
+        assert_eq!(notifications(&database), 1);
+    }
+
+    #[test]
+    fn a_far_deadline_is_not_yet_warned_of() {
+        let database = with_change(DEADLINE_WARNING_MS + 1);
+
+        enqueue_due(&database, 0).unwrap();
+
+        assert_eq!(notifications(&database), 0);
     }
 
     #[test]
