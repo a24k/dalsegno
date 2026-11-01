@@ -543,6 +543,26 @@ fn audio_with_no_silences_skips_that_check() {
 }
 
 #[test]
+fn a_region_after_an_insertion_starts_where_its_audio_does_in_the_old_cycle() {
+    let old = content(90, P);
+    let insert = content(91, 500.0);
+    let new = [&old[..12_000], &insert, &old[12_000..]].concat();
+
+    let diff = compare_cycles(&old, &new);
+
+    let after = diff
+        .regions
+        .iter()
+        .find(|region| region.class == RegionClass::Existing && region.start > 1_000.0)
+        .unwrap();
+    let expected = after.start - 500.0;
+    assert!(
+        (after.match_start.unwrap() - expected).abs() < 0.5,
+        "{after:?}"
+    );
+}
+
+#[test]
 fn distance_wraps_around_the_period() {
     assert_eq!(circular_distance(1.0, 2999.0, 3000.0), 2.0);
     assert_eq!(circular_distance(5.0, 8.0, 3000.0), 3.0);
