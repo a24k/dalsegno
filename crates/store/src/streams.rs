@@ -6,6 +6,48 @@ use rusqlite::{OptionalExtension, Row, params};
 const STREAM_COLUMNS: &str = "id, video_id, title, channel_id, channel_name, thumbnail_url, \
                               video_itag, audio_itag, fragment_len, registered_at";
 
+/// Where a stream is in its life (FR-S4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamState {
+    /// Known, and not started.
+    Registered,
+    /// Started, and the head has not been reached yet.
+    Backfilling,
+    /// Following the head.
+    Recording,
+    /// Stopped by a person.
+    Paused,
+    /// Stopped by a failure. The reason says which.
+    Error,
+    /// The stream has finished.
+    Ended,
+}
+
+impl StreamState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Registered => "registered",
+            Self::Backfilling => "backfilling",
+            Self::Recording => "recording",
+            Self::Paused => "paused",
+            Self::Error => "error",
+            Self::Ended => "ended",
+        }
+    }
+
+    fn parse(text: &str) -> Result<Self, StoreError> {
+        match text {
+            "registered" => Ok(Self::Registered),
+            "backfilling" => Ok(Self::Backfilling),
+            "recording" => Ok(Self::Recording),
+            "paused" => Ok(Self::Paused),
+            "error" => Ok(Self::Error),
+            "ended" => Ok(Self::Ended),
+            _ => Err(StoreError::Invalid("stream state")),
+        }
+    }
+}
+
 /// What registration knows about a stream.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewStream {
@@ -84,6 +126,95 @@ impl Database {
             .connection
             .query_row(&sql, [video_id], stream_from_row)
             .optional()?)
+    }
+
+    /// Returns the stream with this row ID.
+    pub fn stream(&self, stream_id: i64) -> Result<Option<StreamRow>, StoreError> {
+        let sql = format!("SELECT {STREAM_COLUMNS} FROM streams WHERE id = ?1");
+        Ok(self
+            .connection
+            .query_row(&sql, [stream_id], stream_from_row)
+            .optional()?)
+    }
+
+    /// Returns the streams in any of these states, oldest first.
+    pub fn streams_in_states(&self, states: &[StreamState]) -> Result<Vec<StreamRow>, StoreError> {
+        let wanted: Vec<String> = states
+            .iter()
+            .map(|state| format!("'{}'", state.as_str()))
+            .collect();
+        let sql = format!(
+            "SELECT {STREAM_COLUMNS} FROM streams WHERE state IN ({}) ORDER BY id",
+            wanted.join(", ")
+        );
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map([], stream_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Returns the state of a stream and why it is in it.
+    pub fn stream_state(
+        &self,
+        stream_id: i64,
+    ) -> Result<Option<(StreamState, Option<String>)>, StoreError> {
+        let row: Option<(String, Option<String>)> = self
+            .connection
+            .query_row(
+                "SELECT state, state_reason FROM streams WHERE id = ?1",
+                [stream_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        row.map(|(state, reason)| Ok((StreamState::parse(&state)?, reason)))
+            .transpose()
+    }
+
+    /// Moves a stream to a state, with the reason to show (FR-S4).
+    pub fn set_stream_state(
+        &self,
+        stream_id: i64,
+        state: StreamState,
+        reason: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE streams SET state = ?2, state_reason = ?3 WHERE id = ?1",
+            params![stream_id, state.as_str(), reason],
+        )?;
+        Ok(())
+    }
+
+    /// Returns the next `sq` to follow, if following has ever started.
+    pub fn follow_sq(&self, stream_id: i64) -> Result<Option<u64>, StoreError> {
+        let sq: Option<Option<i64>> = self
+            .connection
+            .query_row(
+                "SELECT follow_sq FROM streams WHERE id = ?1",
+                [stream_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(sq.flatten().map(|sq| sq as u64))
+    }
+
+    /// Sets the next `sq` to follow.
+    pub fn set_follow_sq(&self, stream_id: i64, sq: u64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE streams SET follow_sq = ?2 WHERE id = ?1",
+            params![stream_id, sq as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Moves following past a stored head fragment. The first one ends a backfilling state,
+    /// and a stream stopped meanwhile stays stopped.
+    pub fn advance_follow(&self, stream_id: i64, sq: u64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE streams SET follow_sq = ?2, \
+             state = CASE state WHEN 'backfilling' THEN 'recording' ELSE state END \
+             WHERE id = ?1",
+            params![stream_id, sq as i64],
+        )?;
+        Ok(())
     }
 
     /// Records the time of the latest stored fragment.

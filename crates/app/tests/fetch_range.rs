@@ -528,6 +528,36 @@ async fn head_samples_are_taken_at_most_once_a_minute() {
     assert_eq!(samples, 2);
 }
 
+// Following fetches one fragment at a time, so the limit must outlast one range.
+#[tokio::test]
+async fn head_samples_stay_once_a_minute_across_ranges() {
+    let harness = Harness::new(IpPolicy::V4Only).await;
+    for (sq, walltime) in [(1, 1_000_000), (2, 1_030_000), (3, 1_060_000)] {
+        Mock::given(query_param("sq", sq.to_string()))
+            .respond_with(
+                body(sq)
+                    .insert_header("X-Head-Seqnum", "100")
+                    .insert_header("X-Head-Time-Millis", "500250")
+                    .insert_header("X-Walltime-Ms", walltime.to_string()),
+            )
+            .mount(&harness.server)
+            .await;
+    }
+
+    for sq in 1..=3 {
+        harness.fetch(sq, sq).await.unwrap();
+    }
+
+    let samples: i64 = harness
+        .database
+        .lock()
+        .unwrap()
+        .connection()
+        .query_row("SELECT COUNT(*) FROM head_samples", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(samples, 2);
+}
+
 #[tokio::test]
 async fn ranges_longer_than_the_dvr_are_rejected() {
     let harness = Harness::new(IpPolicy::V4Only).await;

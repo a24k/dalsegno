@@ -1,0 +1,402 @@
+//! Keeping one follow task per active stream.
+//!
+//! The database says what should run, so a restart resumes every stream (FR-S5), and a `stop`
+//! from any process reaches its task at the next look.
+
+use dalsegno_app::fetch::{SharedDatabase, lock};
+use dalsegno_app::follow::FollowEnd;
+use dalsegno_store::database::{Database, StoreError};
+use dalsegno_store::streams::{StreamRow, StreamState};
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, sleep};
+
+/// How often the database is looked at.
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// The first wait after a failure. It doubles up to the limit, so an outage does not stop a
+/// stream for good and does not turn into a stream of yt-dlp calls either.
+const RETRY_BASE: Duration = Duration::from_secs(30);
+const RETRY_LIMIT: Duration = Duration::from_secs(600);
+
+const ACTIVE: [StreamState; 2] = [StreamState::Backfilling, StreamState::Recording];
+
+/// What following a stream gives back, with a message safe to store and show.
+pub type FollowFuture = Pin<Box<dyn Future<Output = Result<FollowEnd, String>> + Send>>;
+
+/// Follows one stream until it is told to stop.
+pub trait Follower: Debug + Send + Sync + 'static {
+    /// Starts following.
+    fn follow(&self, row: StreamRow, stop: watch::Receiver<bool>) -> FollowFuture;
+}
+
+#[derive(Debug)]
+struct Running {
+    stop: watch::Sender<bool>,
+    task: JoinHandle<Result<FollowEnd, String>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Retry {
+    failures: u32,
+    at: Instant,
+}
+
+/// Runs the follow tasks.
+#[derive(Debug)]
+pub struct Supervisor {
+    database: SharedDatabase,
+    follower: Arc<dyn Follower>,
+    poll: Duration,
+    retry_base: Duration,
+    running: HashMap<i64, Running>,
+    retries: HashMap<i64, Retry>,
+}
+
+fn delay_after(base: Duration, failures: u32) -> Duration {
+    let doubled = base.saturating_mul(1 << failures.saturating_sub(1).min(16));
+    doubled.min(RETRY_LIMIT)
+}
+
+/// Records how a task ended, unless a person stopped the stream meanwhile.
+fn record_end(
+    database: &Database,
+    id: i64,
+    state: StreamState,
+    reason: &str,
+) -> Result<(), StoreError> {
+    let is_active = database
+        .stream_state(id)?
+        .is_some_and(|(current, _)| ACTIVE.contains(&current));
+    if is_active {
+        database.set_stream_state(id, state, Some(reason))?;
+    }
+    Ok(())
+}
+
+impl Supervisor {
+    /// Makes a supervisor.
+    pub fn new(database: SharedDatabase, follower: Arc<dyn Follower>) -> Self {
+        Self {
+            database,
+            follower,
+            poll: POLL_INTERVAL,
+            retry_base: RETRY_BASE,
+            running: HashMap::new(),
+            retries: HashMap::new(),
+        }
+    }
+
+    /// Runs until `shutdown` turns true, then stops every task.
+    pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
+        while !*shutdown.borrow() {
+            if let Err(error) = self.look().await {
+                tracing::error!(error, "cannot look at the streams");
+            }
+            tokio::select! {
+                () = sleep(self.poll) => {}
+                _ = shutdown.changed() => {}
+            }
+        }
+        for (_, running) in self.running.drain() {
+            running.stop.send_replace(true);
+            let _ = running.task.await;
+        }
+    }
+
+    async fn look(&mut self) -> Result<(), String> {
+        self.reap().await?;
+        self.retry_failed()?;
+        let active = {
+            let database = lock(&self.database).map_err(|error| error.to_string())?;
+            database
+                .streams_in_states(&ACTIVE)
+                .map_err(|error| error.to_string())?
+        };
+        for (id, running) in &self.running {
+            if !active.iter().any(|row| row.id == *id) {
+                running.stop.send_replace(true);
+            }
+        }
+        for row in active {
+            self.running
+                .entry(row.id)
+                .or_insert_with(|| spawn(&self.follower, row));
+        }
+        Ok(())
+    }
+
+    async fn reap(&mut self) -> Result<(), String> {
+        let finished: Vec<i64> = self
+            .running
+            .iter()
+            .filter(|(_, running)| running.task.is_finished())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in finished {
+            let Some(running) = self.running.remove(&id) else {
+                continue;
+            };
+            let outcome = running
+                .task
+                .await
+                .unwrap_or_else(|_| Err("following stopped unexpectedly".to_string()));
+            self.record(id, outcome)?;
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, id: i64, outcome: Result<FollowEnd, String>) -> Result<(), String> {
+        let database = lock(&self.database).map_err(|error| error.to_string())?;
+        let recorded = match &outcome {
+            Ok(FollowEnd::Stopped) => Ok(()),
+            Ok(FollowEnd::Ended(reason)) => record_end(&database, id, StreamState::Ended, reason),
+            Err(reason) => {
+                tracing::warn!(id, reason, "following failed");
+                let failures = self.retries.get(&id).map_or(0, |retry| retry.failures) + 1;
+                let at = Instant::now() + delay_after(self.retry_base, failures);
+                self.retries.insert(id, Retry { failures, at });
+                record_end(&database, id, StreamState::Error, reason)
+            }
+        };
+        recorded.map_err(|error| error.to_string())
+    }
+
+    /// Gives failed streams another go when their wait is over. A stream that failed before a
+    /// restart has no wait left.
+    fn retry_failed(&mut self) -> Result<(), String> {
+        let database = lock(&self.database).map_err(|error| error.to_string())?;
+        let rows = database
+            .streams_in_states(&[StreamState::Error])
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let is_due = self
+                .retries
+                .get(&row.id)
+                .is_none_or(|retry| retry.at <= Instant::now());
+            if is_due {
+                database
+                    .set_stream_state(row.id, StreamState::Backfilling, None)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        let recording = database
+            .streams_in_states(&[StreamState::Recording])
+            .map_err(|error| error.to_string())?;
+        for row in recording {
+            self.retries.remove(&row.id);
+        }
+        Ok(())
+    }
+}
+
+fn spawn(follower: &Arc<dyn Follower>, row: StreamRow) -> Running {
+    let (stop, stopped) = watch::channel(false);
+    Running {
+        stop,
+        task: tokio::spawn(follower.follow(row, stopped)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dalsegno_store::streams::NewStream;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::time::timeout;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// Ends the way it is told to, or runs until stopped.
+    #[derive(Debug, Default)]
+    struct Scripted {
+        ends: Mutex<Vec<Result<FollowEnd, String>>>,
+        started: AtomicUsize,
+        stopped: Arc<AtomicUsize>,
+    }
+
+    impl Follower for Arc<Scripted> {
+        fn follow(&self, _row: StreamRow, mut stop: watch::Receiver<bool>) -> FollowFuture {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let end = self.ends.lock().unwrap().pop();
+            let stopped = Arc::clone(&self.stopped);
+            Box::pin(async move {
+                if let Some(end) = end {
+                    return end;
+                }
+                let _ = stop.wait_for(|stop| *stop).await;
+                stopped.fetch_add(1, Ordering::SeqCst);
+                Ok(FollowEnd::Stopped)
+            })
+        }
+    }
+
+    fn database_with_stream(state: StreamState) -> (SharedDatabase, i64) {
+        let database = Database::open_in_memory().unwrap();
+        let id = database
+            .insert_stream(&NewStream {
+                video_id: "abcDEF123_-".to_string(),
+                title: "Example TV".to_string(),
+                channel_id: None,
+                channel_name: None,
+                thumbnail_url: None,
+                video_itag: None,
+                audio_itag: 140,
+                fragment_len: 5.0,
+                registered_at: 0,
+            })
+            .unwrap();
+        database.set_stream_state(id, state, None).unwrap();
+        (Arc::new(Mutex::new(database)), id)
+    }
+
+    fn supervisor(database: &SharedDatabase, follower: &Arc<Scripted>) -> Supervisor {
+        Supervisor {
+            database: Arc::clone(database),
+            follower: Arc::new(Arc::clone(follower)),
+            poll: Duration::from_millis(5),
+            retry_base: Duration::from_millis(5),
+            running: HashMap::new(),
+            retries: HashMap::new(),
+        }
+    }
+
+    fn state(database: &SharedDatabase, id: i64) -> (StreamState, Option<String>) {
+        lock(database).unwrap().stream_state(id).unwrap().unwrap()
+    }
+
+    async fn until(what: impl Fn() -> bool) {
+        timeout(WAIT, async {
+            while !what() {
+                sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_active_stream_is_followed_once() {
+        let (database, _) = database_with_stream(StreamState::Recording);
+        let follower = Arc::new(Scripted::default());
+        let (stop, shutdown) = watch::channel(false);
+        let running = tokio::spawn(supervisor(&database, &follower).run(shutdown));
+
+        until(|| follower.started.load(Ordering::SeqCst) > 0).await;
+        sleep(Duration::from_millis(30)).await;
+        stop.send(true).unwrap();
+        running.await.unwrap();
+
+        assert_eq!(follower.started.load(Ordering::SeqCst), 1);
+        assert_eq!(follower.stopped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stream_not_started_is_left_alone() {
+        let (database, _) = database_with_stream(StreamState::Registered);
+        let follower = Arc::new(Scripted::default());
+        let (stop, shutdown) = watch::channel(false);
+        let running = tokio::spawn(supervisor(&database, &follower).run(shutdown));
+
+        sleep(Duration::from_millis(30)).await;
+        stop.send(true).unwrap();
+        running.await.unwrap();
+
+        assert_eq!(follower.started.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn pausing_stops_the_task() {
+        let (database, id) = database_with_stream(StreamState::Recording);
+        let follower = Arc::new(Scripted::default());
+        let (stop, shutdown) = watch::channel(false);
+        let running = tokio::spawn(supervisor(&database, &follower).run(shutdown));
+        until(|| follower.started.load(Ordering::SeqCst) > 0).await;
+
+        lock(&database)
+            .unwrap()
+            .set_stream_state(id, StreamState::Paused, None)
+            .unwrap();
+
+        until(|| follower.stopped.load(Ordering::SeqCst) > 0).await;
+        stop.send(true).unwrap();
+        running.await.unwrap();
+        assert_eq!(state(&database, id).0, StreamState::Paused);
+    }
+
+    #[tokio::test]
+    async fn a_finished_stream_ends_with_its_reason() {
+        let (database, id) = database_with_stream(StreamState::Recording);
+        let follower = Arc::new(Scripted::default());
+        follower
+            .ends
+            .lock()
+            .unwrap()
+            .push(Ok(FollowEnd::Ended("has ended".to_string())));
+        let (stop, shutdown) = watch::channel(false);
+        let running = tokio::spawn(supervisor(&database, &follower).run(shutdown));
+
+        until(|| state(&database, id).0 == StreamState::Ended).await;
+        stop.send(true).unwrap();
+        running.await.unwrap();
+
+        assert_eq!(state(&database, id).1.as_deref(), Some("has ended"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_stream_shows_the_reason_and_is_tried_again() {
+        let (database, id) = database_with_stream(StreamState::Recording);
+        let follower = Arc::new(Scripted::default());
+        follower
+            .ends
+            .lock()
+            .unwrap()
+            .push(Err("offline".to_string()));
+        let (stop, shutdown) = watch::channel(false);
+        let mut watched = supervisor(&database, &follower);
+        watched.retry_base = Duration::from_millis(40);
+        let running = tokio::spawn(watched.run(shutdown));
+
+        until(|| state(&database, id).0 == StreamState::Error).await;
+        assert_eq!(state(&database, id).1.as_deref(), Some("offline"));
+        until(|| follower.started.load(Ordering::SeqCst) == 2).await;
+        stop.send(true).unwrap();
+        running.await.unwrap();
+
+        assert_eq!(state(&database, id), (StreamState::Backfilling, None));
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_failed_before_a_restart_is_tried_at_once() {
+        let (database, _) = database_with_stream(StreamState::Error);
+        let follower = Arc::new(Scripted::default());
+        let (stop, shutdown) = watch::channel(false);
+        let running = tokio::spawn(supervisor(&database, &follower).run(shutdown));
+
+        until(|| follower.started.load(Ordering::SeqCst) == 1).await;
+        stop.send(true).unwrap();
+        running.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_a_pause_keeps_the_pause() {
+        let (database, id) = database_with_stream(StreamState::Paused);
+
+        record_end(&lock(&database).unwrap(), id, StreamState::Error, "offline").unwrap();
+
+        assert_eq!(state(&database, id).0, StreamState::Paused);
+    }
+
+    #[test]
+    fn waits_double_up_to_the_limit() {
+        assert_eq!(delay_after(RETRY_BASE, 1), RETRY_BASE);
+        assert_eq!(delay_after(RETRY_BASE, 2), RETRY_BASE * 2);
+        assert_eq!(delay_after(RETRY_BASE, 500), RETRY_LIMIT);
+    }
+}

@@ -198,11 +198,14 @@ pub async fn fetch_range<R: Resolver>(
     let total = range.last - range.first + 1;
     let already_stored = total - missing.len() as u64;
     let concurrency = fetcher.limits.concurrency;
+    let last_head_sample = lock(&fetcher.ledger.database)?
+        .latest_head_sample(range.stream_id)?
+        .map_or(i64::MIN, |sample| sample.observed_at);
     let run = Arc::new(Run {
         pacer: Pacer::new(fetcher.limits.requests_per_second),
         fetcher,
         range,
-        last_head_sample: Mutex::new(i64::MIN),
+        last_head_sample: Mutex::new(last_head_sample),
         queue: Mutex::new(missing),
         report: Mutex::new(FetchReport {
             already_stored,

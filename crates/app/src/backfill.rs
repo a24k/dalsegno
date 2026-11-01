@@ -55,7 +55,12 @@ pub async fn backfill<R: Resolver>(
     Ok(report)
 }
 
-fn record_missing<R>(fetcher: &Fetcher<R>, first: u64, last: u64) -> Result<(), AcquireError> {
+/// Records what is neither stored nor in a known gap as open gaps.
+pub(crate) fn record_missing<R>(
+    fetcher: &Fetcher<R>,
+    first: u64,
+    last: u64,
+) -> Result<(), AcquireError> {
     let ledger = &fetcher.ledger;
     let database = lock(&ledger.database)?;
     let stored: BTreeSet<u64> = database

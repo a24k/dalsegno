@@ -11,6 +11,7 @@ use crate::fetch::{
     FetchLimits, FetchRange, FetchReport, Fetcher, Ledger, RetryPolicy, SharedDatabase,
     fetch_range, lock,
 };
+use crate::follow::{FollowEnd, FollowPolicy, follow};
 use crate::probe::{ProbeReport, ProbeTools, probe_stream};
 use crate::retention::{SweepReport, sweep};
 use crate::session::{Clock, Session, system_clock};
@@ -27,6 +28,7 @@ use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 use tokio::task::spawn_blocking;
 
 const YT_DLP: &str = "yt-dlp";
@@ -232,6 +234,18 @@ impl Acquisition {
         let row = library.registered(stream)?;
         let fetcher = self.fetcher(library, &row, row.stream.audio_itag)?;
         backfill(Arc::new(fetcher), row.stream.fragment_len, hours).await
+    }
+
+    /// Follows a stream's audio until `stop` turns true, the stream ends, or following fails.
+    pub async fn follow(
+        &self,
+        library: &Library,
+        row: &StreamRow,
+        stop: watch::Receiver<bool>,
+    ) -> Result<FollowEnd, AcquireError> {
+        let fetcher = self.fetcher(library, row, row.stream.audio_itag)?;
+        let policy = FollowPolicy::for_fragment_length(row.stream.fragment_len);
+        follow(Arc::new(fetcher), policy, stop).await
     }
 
     pub(crate) fn fetcher(

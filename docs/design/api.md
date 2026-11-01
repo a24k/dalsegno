@@ -68,6 +68,8 @@ Until milestone 5 these commands run in process (D-17). All but `doctor` and `pr
 dalsegno doctor   [--stream <id>]
 dalsegno probe    <id>
 dalsegno add      <id>
+dalsegno start    <id>
+dalsegno stop     <id>
 dalsegno fetch    <id> --itag <n> --first <sq> --last <sq> [--output <file>]
 dalsegno backfill <id> [--hours <n>]
 dalsegno features <id>

@@ -13,6 +13,7 @@ use dalsegno_app::export::{
 use dalsegno_app::offline::{self, DiffRequest};
 use serde::Serialize;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use text::{
     add_text, backfill_text, candidates_text, cut_text, diff_text, doctor_text, features_text,
     fetch_text, period_text, probe_text, publish_text, refine_text, scan_text, sweep_text,
@@ -50,6 +51,16 @@ struct Cli {
 enum Command {
     /// Run the service until it is stopped.
     Serve,
+    /// Start following a stream, and filling what it missed.
+    Start {
+        /// Video ID or URL.
+        stream: String,
+    },
+    /// Stop following a stream.
+    Stop {
+        /// Video ID or URL.
+        stream: String,
+    },
     /// Report tools, IPv6 route and IP family, and test URL resolution for a stream.
     Doctor {
         /// Video ID or URL to resolve over each family.
@@ -284,6 +295,16 @@ impl From<CutKind> for ExportKind {
     }
 }
 
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as i64)
+}
+
+fn state_text(state: &String) -> String {
+    format!("{state}\n")
+}
+
 fn parse_mode(text: &str) -> Result<u32, String> {
     u32::from_str_radix(text, 8)
         .ok()
@@ -309,7 +330,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     };
     if matches!(command, Command::Serve) {
-        return dalsegno_server::serve(&Config::load()?).await;
+        return dalsegno_server::serve(&Config::load()?, cli.ip_policy).await;
     }
     let json = cli.json;
     let command = match run_offline(command, json).await? {
@@ -345,6 +366,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Features { stream } => {
             let report = library()?.features(&stream).await?;
             print_report(cli.json, &report, features_text)
+        }
+        Command::Start { stream } => {
+            let state = library()?.start_stream(&stream, now_ms())?;
+            print_report(cli.json, &format!("{state:?}"), state_text)
+        }
+        Command::Stop { stream } => {
+            let state = library()?.stop_stream(&stream)?;
+            print_report(cli.json, &format!("{state:?}"), state_text)
         }
         Command::Sweep => {
             let report = library()?.sweep().await?;
