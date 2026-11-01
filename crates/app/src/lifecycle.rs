@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 pub const BACKFILL: &str = "backfill";
 /// The job that brings a stream's envelope up to date.
 pub const FEATURES: &str = "features";
+/// The job that tracks a stream and follows its changes.
+pub const ANALYSIS: &str = "analysis";
+/// The job that fetches the video around a change.
+pub const PREFETCH: &str = "prefetch";
 
 /// What a job about a stream is about.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +47,40 @@ impl StreamTarget {
     /// Returns the job that brings a stream's envelope up to date.
     pub fn features(row: &StreamRow) -> Result<NewJob, AcquireError> {
         Self::job(row, FEATURES, JobClass::Cpu)
+    }
+
+    /// Returns the job that tracks a stream.
+    pub fn analysis(row: &StreamRow) -> Result<NewJob, AcquireError> {
+        Self::job(row, ANALYSIS, JobClass::Cpu)
+    }
+
+    /// Reads a stored target.
+    pub fn parse(target: &str) -> Option<Self> {
+        serde_json::from_str(target).ok()
+    }
+}
+
+/// The video to keep and fetch for a change (FR-E1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefetchTarget {
+    /// Video ID.
+    pub stream: String,
+    /// The change that holds it.
+    pub change: i64,
+    /// First `sq`.
+    pub first: u64,
+    /// Last `sq`.
+    pub last: u64,
+}
+
+impl PrefetchTarget {
+    /// Returns the job.
+    pub fn job(&self) -> Result<NewJob, AcquireError> {
+        Ok(NewJob {
+            kind: PREFETCH.to_string(),
+            class: JobClass::NetLow,
+            target: serde_json::to_string(self).map_err(|_| AcquireError::Task)?,
+        })
     }
 
     /// Reads a stored target.

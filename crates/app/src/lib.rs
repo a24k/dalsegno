@@ -12,6 +12,7 @@ pub mod features;
 pub mod fetch;
 pub mod follow;
 pub mod lifecycle;
+pub mod monitor;
 pub mod offline;
 pub mod probe;
 pub mod retention;
