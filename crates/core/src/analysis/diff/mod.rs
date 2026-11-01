@@ -5,12 +5,23 @@
 use super::ncc::{Correlator, MIN_REFERENCE_DEVIATION};
 use super::period::clusters;
 use super::series::Prepared;
+use super::videos::{nearest_silence, silence_centres};
 use edges::{EdgeComparison, refine_edges};
 use rayon::prelude::*;
 use serde::Serialize;
 
 mod edges;
 mod reclaim;
+
+/// A silence this close to the edge of a region belongs to the edge, in seconds.
+const EDGE_MARGIN: f64 = 5.0;
+/// The name of the check on silences.
+const SILENCE_CHECK: &str = "silences recur at the matched shift";
+/// How far from the expected place a silence may lie, in seconds. Shifts within a region differ
+/// by up to the shift tolerance.
+const SILENCE_REACH: f64 = 3.5;
+/// Share of silences that may be missing, as level around them can differ between versions.
+const SILENCE_TOLERANCE: f64 = 0.1;
 
 /// Comparison parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -140,6 +151,9 @@ pub struct Diff {
     pub regions: Vec<Region>,
     /// Changes of shift along the regions that keep the previous version's order.
     pub shift_changes: Vec<f64>,
+    /// Silences inside new regions, in time order. One region can join several videos, and
+    /// which ones belong together is a person's call (FR-N13).
+    pub video_boundaries: Vec<f64>,
     /// The checks of FR-N8.
     pub checks: Vec<SelfCheck>,
 }
@@ -211,7 +225,7 @@ pub fn compare(
         .first()
         .map_or(0.0, |previous| period - previous.period);
     let edges = 2 * (regions.iter().filter(|region| is_inserted(region)).count() + deleted.len());
-    let checks = vec![
+    let mut checks = vec![
         check(
             "shift changes sum to the period change",
             change,
@@ -227,12 +241,70 @@ pub fn compare(
                 .max(edges as f64 * config.edge_tolerance),
         ),
     ];
+    checks.extend(silences_recur(&regions, current, versions));
+    let video_boundaries = boundaries_inside_new(&regions, current);
     regions.extend(deleted);
     Diff {
         regions,
         shift_changes,
+        video_boundaries,
         checks,
     }
+}
+
+/// Returns the silences of a region, leaving out the ones at its edges. They are found over the
+/// whole region first, as a silence cut by a narrower range has a false middle.
+fn silences_inside(region: &Region, current: &Prepared) -> Vec<f64> {
+    let inside = (region.start + EDGE_MARGIN)..(region.end - EDGE_MARGIN);
+    silence_centres(current, region.start, region.end)
+        .into_iter()
+        .filter(|time| inside.contains(time))
+        .collect()
+}
+
+/// Reports the silences inside new regions.
+fn boundaries_inside_new(regions: &[Region], current: &Prepared) -> Vec<f64> {
+    regions
+        .iter()
+        .filter(|region| region.class == RegionClass::New)
+        .flat_map(|region| silences_inside(region, current))
+        .collect()
+}
+
+/// Checks that the silences of existing regions are there in the matched version too. This is
+/// evidence apart from the envelope matching that placed the regions, as silences are read from
+/// the level alone. Audio with no silences to compare gives no check.
+fn silences_recur(
+    regions: &[Region],
+    current: &Prepared,
+    versions: &[VersionCycle<'_>],
+) -> Option<SelfCheck> {
+    let results: Vec<bool> = regions
+        .iter()
+        .filter(|region| region.class == RegionClass::Existing && !region.moved)
+        .filter_map(|region| {
+            let cycle = versions
+                .iter()
+                .find(|cycle| Some(cycle.id) == region.version)?;
+            let shift = region.shift?;
+            let found = silences_inside(region, current).into_iter().map(|time| {
+                let position = cycle.start + (time - shift - cycle.start).rem_euclid(cycle.period);
+                nearest_silence(cycle.data, position, SILENCE_REACH).is_some()
+            });
+            Some(found.collect::<Vec<bool>>())
+        })
+        .flatten()
+        .collect();
+    if results.is_empty() {
+        return None;
+    }
+    let matched = results.iter().filter(|found| **found).count();
+    Some(check(
+        SILENCE_CHECK,
+        1.0,
+        matched as f64 / results.len() as f64,
+        SILENCE_TOLERANCE,
+    ))
 }
 
 /// Finds each place a recurring clip plays within `range` of `current`.

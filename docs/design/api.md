@@ -48,15 +48,14 @@ SSE events are `job.progress`, `stream.state`, `change.updated`.
 `DALSEGNO_URL` selects the service, with `http://127.0.0.1:<port>` as default. Output is
 human-readable by default, or `--json` for scripts.
 
-Offline commands read files and never need the service (FR-N11). Passing `--env` or
-`--video` selects offline mode; otherwise `scan`, `diff` and `refine` call the API:
+Offline commands read files and never need the service (FR-N11). Passing `--env` selects
+offline mode; otherwise `scan` and `diff` call the API:
 
 ```text
 dalsegno envelope --fragments <dir> --first <sq> --last <sq> --output <file>
 dalsegno period   --env <file> [--min <s>] [--max <s>]
 dalsegno scan     --env <file> --period <s> [--from <s>]
 dalsegno diff     --env <file> --period <s> --against <file> --against-period <s> [--known <file>]
-dalsegno refine   --video <file> --at <s>
 ```
 
 Envelope input accepts `.npy` so that existing Python results can be used directly.
@@ -72,6 +71,11 @@ dalsegno fetch    <id> --itag <n> --first <sq> --last <sq> [--output <file>]
 dalsegno backfill <id> [--hours <n>]
 dalsegno features <id>
 dalsegno sweep
+dalsegno program    <id> --short-name <name> --output-dir <dir>
+dalsegno candidates <id> --time <s>
+dalsegno refine     <id> --boundary <s> --period <s>
+dalsegno cut        <id> --kind <kind> --start-sq <sq> --duration <s> --named-at <unix>
+dalsegno publish    <clip> --library <dir>
 ```
 
 Use the CLI when a judgement looks suspicious, for example a region classified as new that
@@ -85,7 +89,7 @@ a test oracle:
 
 ```text
 Example TV: period changed around 10/31 01:06 (38,376.7 s -> 42,244.7 s).
-2 new-region candidates (about 13 min and about 72 min). Video already fetched.
+3 new regions (about 8, 56 and 7 min). Video already fetched.
 Export the full cycle by 11/04 22:00.
 ```
 

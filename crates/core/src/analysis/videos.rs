@@ -34,7 +34,8 @@ pub(super) fn nearest_silence(data: &Prepared, time: f64, reach: f64) -> Option<
         .min_by(|a, b| (a - time).abs().total_cmp(&(b - time).abs()))
 }
 
-fn silence_centres(data: &Prepared, start: f64, end: f64) -> Vec<f64> {
+/// Returns the middle of each silence in `start..end`.
+pub(super) fn silence_centres(data: &Prepared, start: f64, end: f64) -> Vec<f64> {
     let (Some(first), Some(last)) = (data.index_of(start), data.index_of(end)) else {
         return Vec::new();
     };

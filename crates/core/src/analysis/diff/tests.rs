@@ -442,6 +442,106 @@ fn an_addition_keeps_its_end_when_the_audio_after_it_is_unrelated() {
     assert!(classes(&diff).contains(&RegionClass::Deleted));
 }
 
+fn silence(seconds: f64) -> Vec<f32> {
+    vec![0.0; (seconds * 10.0) as usize]
+}
+
+/// Content with a silence every `every` seconds.
+fn with_silences(seed: u64, every: f64, count: usize) -> Vec<f32> {
+    (0..count)
+        .flat_map(|index| [content(seed + index as u64, every), silence(1.0)].concat())
+        .collect()
+}
+
+#[test]
+fn silences_inside_new_audio_are_reported_as_boundaries() {
+    let old = content(50, P);
+    let added = [content(51, 300.0), silence(1.0), content(52, 300.0)].concat();
+    let new = [&old[..12_000], &added, &old[12_000..]].concat();
+
+    let diff = compare_cycles(&old, &new);
+
+    assert_eq!(
+        diff.video_boundaries.len(),
+        1,
+        "{:?}",
+        diff.video_boundaries
+    );
+    assert!((diff.video_boundaries[0] - 1500.5).abs() < 1.0);
+}
+
+#[test]
+fn the_edges_of_new_audio_are_not_boundaries_inside_it() {
+    let old = [content(53, 1200.0), silence(1.0), content(54, 1799.0)].concat();
+    let added = content(55, 500.0);
+    let new = [&old[..12_005], &added, &old[12_005..]].concat();
+
+    let diff = compare_cycles(&old, &new);
+
+    assert_eq!(diff.video_boundaries, Vec::<f64>::new());
+}
+
+#[test]
+fn silences_recurring_at_the_shift_pass_a_check_of_their_own() {
+    let cycle = with_silences(60, 299.0, 10);
+
+    let diff = compare_cycles(&cycle, &cycle);
+
+    let check = diff
+        .checks
+        .iter()
+        .find(|check| check.name == SILENCE_CHECK)
+        .expect("silences to check");
+    assert!(check.passed, "{check:?}");
+    assert_eq!(check.actual, 1.0);
+}
+
+#[test]
+fn silences_missing_from_the_old_cycle_fail_that_check() {
+    let current = prepared(&with_silences(70, 299.0, 10));
+    let previous = prepared(&content(71, P));
+    let versions = [version(&previous, 1, P)];
+    let regions = [Region {
+        class: RegionClass::Existing,
+        start: 0.0,
+        end: 3000.0,
+        shift: Some(0.0),
+        version: Some(1),
+        match_start: None,
+        moved: false,
+    }];
+
+    let check = silences_recur(&regions, &current, &versions).expect("silences to check");
+
+    assert!(!check.passed, "{check:?}");
+    assert_eq!(check.actual, 0.0);
+}
+
+#[test]
+fn a_silence_at_the_edge_of_new_audio_has_no_false_middle() {
+    let current = prepared(&[content(72, 100.0), silence(10.0), content(73, 100.0)].concat());
+    let added = Region {
+        class: RegionClass::New,
+        start: 0.0,
+        end: 105.0,
+        shift: None,
+        version: None,
+        match_start: None,
+        moved: false,
+    };
+
+    assert_eq!(boundaries_inside_new(&[added], &current), Vec::<f64>::new());
+}
+
+#[test]
+fn audio_with_no_silences_skips_that_check() {
+    let cycle = content(80, P);
+
+    let diff = compare_cycles(&cycle, &cycle);
+
+    assert!(diff.checks.iter().all(|check| check.name != SILENCE_CHECK));
+}
+
 #[test]
 fn distance_wraps_around_the_period() {
     assert_eq!(circular_distance(1.0, 2999.0, 3000.0), 2.0);

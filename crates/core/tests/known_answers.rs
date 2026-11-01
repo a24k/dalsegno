@@ -32,6 +32,8 @@ const ADDITION_A: f64 = 455.0;
 const ADDITION_B: f64 = 3_414.0;
 /// Addition B took the place of this much old audio. Addition A replaced nothing.
 const DELETED_FOR_ADDITION_B: f64 = 716.0;
+/// The one silence inside the new audio of addition B, seen between two videos in its frames.
+const VIDEO_BOUNDARY_IN_B: f64 = 12_794_015.5;
 
 fn envelope(name: &str) -> Option<Vec<f32>> {
     let fixtures = dalsegno_test_support::fixtures_dir()?;
@@ -196,6 +198,15 @@ fn comparison_finds_both_additions_of_10_31() {
         .map(|region| region.end - region.start)
         .sum();
     assert_near(deleted, DELETED_FOR_ADDITION_B, 15.0);
+    assert_eq!(
+        diff.video_boundaries.len(),
+        1,
+        "{:?}",
+        diff.video_boundaries
+    );
+    assert_near(diff.video_boundaries[0], VIDEO_BOUNDARY_IN_B, 1.0);
+    assert!(diff.checks.iter().all(|check| check.passed));
+    assert_eq!(diff.checks.len(), 3);
     assert!(
         diff.regions
             .iter()
