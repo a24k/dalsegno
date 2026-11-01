@@ -177,7 +177,7 @@ Use different parameters when examining the whole coarsely and when examining fi
 
 - Keyframes, for a file obtained from fragment boundaries, are every 5 seconds from the start. To check, look at the lines marked `K` with `ffprobe -read_intervals A%B -select_streams v -show_entries packet=pts_time,flags` (`-skip_frame nokey` does not work with VP9)
 - **Start point**: a keyframe inside the silence/black. If there are several, a person chooses (in practice "a few seconds before the black" and "the start of the silence" were preferred)
-- **End point**: even with `-c copy`, the end can be cut at any frame. Make it a position where not a single frame of the next content enters, such as the moment the sound disappears (silence_start)
+- **End point**: even with `-c copy`, the end can be cut at any frame. Make it a position where not a single frame of the next content enters, such as the moment the sound disappears (silence_start). A piece that closes on a card in silence ends just before the sound returns instead, about 18 seconds later in the one measured case
 - `-to` in `ffmpeg -ss <start> -i in -to <length> -map 0 -c copy` becomes "elapsed time from the start of the cut" when `-ss` is placed before the input. Beware of miscalculation
 
 ## 5.3 Cutting one pass and refining the period

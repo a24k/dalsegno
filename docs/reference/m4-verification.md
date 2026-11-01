@@ -45,6 +45,13 @@ stretch, and the period change still added up. Edges of a change now walk into n
 
 The cut holds this copy as well: its 394 s also still play at their old place in the loop.
 
+## Ends against a person's choice
+
+The operator judged that the cut's first piece ends 3,340.3 s in, 13 minutes before the end of the
+cut. It closes on a card in silence. The first end candidate there was the moment the sound
+stops, 3,322.5 s, and no candidate lay closer than about 18 s. Ends now cover both edges of a
+silence, and on real fragments one lies 3,340.28 s in, within 0.1 s. It is one case.
+
 ## Safety
 
 | Check | Where |

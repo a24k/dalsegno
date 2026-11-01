@@ -100,17 +100,18 @@ from [roadmap.md](roadmap.md).
 | FR-N6 | Keep features for all versions indefinitely, and enough source audio to recompute them with a future feature set. | M | 2 |
 | FR-N7 | Register and replace known recurring material manually. | M | 3, 6 |
 | FR-N8 | Check that shift changes sum to the period change and that inserted minus deleted equals the period change, where inserted covers new, revival and known regions; ask for human review when they disagree. | M | 3 |
-| FR-N9 | Provide an evaluation harness reporting boundary error in seconds and precision/recall of new regions, against known answers and synthetic data. | M | 7 |
+| FR-N9 | Provide an evaluation harness reporting boundary error in seconds, precision/recall of new regions, and how often a confirmed boundary was among the candidates, against known answers and synthetic data. | M | 7 |
 | FR-N10 | Replace `diff` and `refine` with segment alignment, richer features (decoding at 8–11 kHz; band energies, chroma, onset, then landmark fingerprints) and sub-second boundaries (5–10 s windows or 0.1 s frame distance), each step justified by the harness. Default thresholds come from the harness and stay configurable. | S | 7 |
 | FR-N11 | All analysis commands run offline against files or envelopes, without the service. | M | 3 |
 | FR-N12 | Suggest known-material candidates (3–4 minute segments occurring several times per cycle). | S | 7 |
+| FR-N13 | Report the likely video boundaries inside each new region, as one region can join pieces of several origins. | M | 5 |
 
 ### 4.4 Boundaries and export
 
 | ID | Requirement | Pri | MS |
 | --- | --- | --- | --- |
 | FR-E1 | Prefetch candidate video and audio with margins on change detection. | M | 5 |
-| FR-E2 | Detect black and silence candidates, preferring overlaps; offer several and never pick silently. | M | 4 |
+| FR-E2 | Detect black and silence candidates, preferring overlaps; offer several and never pick silently. Offering the boundary a person wants comes before ranking it first: end candidates cover both edges of a silence, as a piece can close in silence. | M | 4 |
 | FR-E3 | Refine the period from matching black intervals one cycle apart. | M | 4 |
 | FR-E4 | Start points are keyframes taken from measured data; end points may be any frame. | M | 4 |
 | FR-E5 | Verify that a full-cycle cut lies wholly within the period its version was on air. | M | 4 |
@@ -122,6 +123,7 @@ from [roadmap.md](roadmap.md).
 | FR-E11 | Trigger a Plex rescan and confirm the item was registered. | S | 4, 6 |
 | FR-E12 | Store everything needed to reproduce a cut. | M | 4 |
 | FR-E13 | Fetch any fragment range an export needs but does not yet have, after checking that it is still in the DVR. | M | 4 |
+| FR-E14 | Keep each boundary a person confirms, with the candidates offered for it, as known answers for FR-N9. | M | 6 |
 
 ### 4.5 Notifications and jobs
 
@@ -137,8 +139,8 @@ from [roadmap.md](roadmap.md).
 | --- | --- | --- | --- |
 | FR-U1 | Dashboard: stream states, current period, open changes with DVR time left, recent jobs. | M | 6 |
 | FR-U2 | Stream management: add, start, stop, edit metadata, link to program, known material. | M | 6 |
-| FR-U3 | Change detail: side-by-side version strip colour-coded by class, candidates, self-check results. | M | 6 |
-| FR-U4 | Boundary editor: preview with black, silence and keyframe marks; keyframe snapping; numeric entry; contact sheet. | M | 6 |
+| FR-U3 | Change detail: side-by-side version strip colour-coded by class, video boundaries inside each region, candidates, self-check results. | M | 6 |
+| FR-U4 | Boundary editor: preview with black, silence and keyframe marks; keyframe snapping; numeric entry; contact sheet. A cut may start and end anywhere, not only at the edges of a region. | M | 6 |
 | FR-U5 | Export: name, metadata, poster frame, run, progress, Plex confirmation. | M | 6 |
 | FR-U6 | Jobs and logs; settings and diagnostics (same content as `doctor`). | M | 6 |
 | FR-U7 | Preview playback supports HTTP Range and works in Safari through generated H.264 clips. | M | 6 |

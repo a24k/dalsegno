@@ -14,7 +14,8 @@ For a region `[a, b]`:
 3. Score candidates: black plus silence overlap first, then either alone, marked as
    weak since those are often part of a song.
 4. Attach the keyframes from `fragments` (D-06). Start candidates are the keyframes
-   inside or just before an overlap, end candidates are `silence_start` positions.
+   inside or just before an overlap. End candidates are `silence_start` positions, and
+   just before each `silence_end`, for a piece that closes in silence (D-31).
 5. If known material directly precedes the region, favour the start candidates at its end.
 6. Generate the contact sheet and H.264 preview, at low priority.
 
