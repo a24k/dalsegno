@@ -5,7 +5,7 @@
 
 use crate::error::AcquireError;
 use crate::fetch::{SharedDatabase, lock};
-use crate::lifecycle::PrefetchTarget;
+use crate::lifecycle::{PrefetchTarget, ensure_program};
 use crate::notify::CHANGE;
 use dalsegno_core::analysis::{
     Diff, DiffConfig, LagRun, PeriodConfig, PeriodEstimate, Prepared, Region, RunKind, Series,
@@ -162,9 +162,7 @@ pub fn run_pass(
             read_history(&database, row.id)?,
             database.stream_period(row.id)?,
             database.analysis_state(row.id)?,
-            database
-                .program_of_stream(row.id)?
-                .map(|program| program.id),
+            ensure_program(&database, row)?.id,
         )
     };
     let Some(series) = series else {
@@ -185,10 +183,7 @@ pub fn run_pass(
         period: Some(period),
         ..MonitorReport::default()
     };
-    match program {
-        Some(program) => pass.follow_change(program, period, seen, report),
-        None => Ok(report),
-    }
+    pass.follow_change(program, period, seen, report)
 }
 
 impl Pass<'_> {
@@ -247,7 +242,7 @@ impl Pass<'_> {
         })
     }
 
-    fn find_first_period(&self, program: Option<i64>) -> Result<MonitorReport, AcquireError> {
+    fn find_first_period(&self, program: i64) -> Result<MonitorReport, AcquireError> {
         let estimate = estimate_period(self.data, &PeriodConfig::default());
         let database = lock(self.database)?;
         match estimate {
@@ -260,11 +255,9 @@ impl Pass<'_> {
                 database.atomically(|database| {
                     database.set_stream_period(self.row.id, period)?;
                     database.save_tracking(self.row.id, tracking.tracked_until, &[], tracking)?;
-                    if let Some(program) = program {
-                        current_or_first_version(
-                            database, self.row, program, self.data, period, self.now,
-                        )?;
-                    }
+                    current_or_first_version(
+                        database, self.row, program, self.data, period, self.now,
+                    )?;
                     Ok::<_, AcquireError>(())
                 })?;
                 Ok(MonitorReport {
@@ -731,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_with_no_program_tracks_and_opens_nothing() {
+    fn a_stream_with_no_program_gets_one_and_its_change_is_seen() {
         let mut fixture = Fixture::new();
         lock(&fixture.database)
             .unwrap()
@@ -743,8 +736,8 @@ mod tests {
         fixture.pass();
         fixture.store(&inserted(&cycle, 9));
 
-        assert_eq!(fixture.pass().opened, None);
-        assert!(fixture.count("SELECT COUNT(*) FROM lag_runs") > 0);
+        assert!(fixture.pass().opened.is_some());
+        assert_eq!(fixture.count("SELECT COUNT(*) FROM programs"), 2);
     }
 
     #[test]

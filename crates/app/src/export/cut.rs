@@ -4,6 +4,7 @@
 use crate::acquisition::{Acquisition, Library};
 use crate::error::AcquireError;
 use crate::fetch::lock;
+use crate::lifecycle::ensure_program;
 use dalsegno_core::export::{
     CutError, ExportKind, ExportName, FragmentRange, NameParts, Piece, check_air_time, plan_cut,
     render_name, sanitise_info,
@@ -412,9 +413,7 @@ where
         .stream
         .video_itag
         .ok_or_else(|| AcquireError::NoVideo(row.stream.video_id.clone()))?;
-    let program = lock(&library.database)?
-        .program_of_stream(row.id)?
-        .ok_or_else(|| AcquireError::NoProgram(row.stream.video_id.clone()))?;
+    let program = ensure_program(&*lock(&library.database)?, &row)?;
     let (name, tags) = prepare(request, &program, &row)?;
     let assembler = Assembler {
         library,

@@ -265,7 +265,7 @@ async fn a_cycle_without_an_air_time_is_blocked() {
 }
 
 #[tokio::test]
-async fn a_stream_with_no_program_cannot_be_cut() {
+async fn a_stream_with_no_program_is_given_one_to_be_cut() {
     let Some(setup) = setup() else {
         return;
     };
@@ -275,9 +275,9 @@ async fn a_stream_with_no_program_cannot_be_cut() {
         .execute("UPDATE streams SET program_id = NULL", [])
         .unwrap();
 
-    let result = cut_stored(&setup, &request()).await;
+    let report = cut_stored(&setup, &request()).await.unwrap();
 
-    assert!(matches!(result, Err(AcquireError::NoProgram(_))));
+    assert!(report.name.starts_with("Example TV "), "{}", report.name);
 }
 
 #[tokio::test]

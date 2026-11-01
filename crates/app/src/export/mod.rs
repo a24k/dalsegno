@@ -39,11 +39,16 @@ pub fn find_tools() -> Result<Ffmpeg, AcquireError> {
 }
 
 impl Library {
-    /// Records a stream's program, which holds its naming and output folder.
+    /// Sets a stream's program, which holds its naming and output folder. One made for it
+    /// keeps its row, and with that its versions.
     pub fn set_program(&self, stream: &str, program: &NewProgram) -> Result<i64, AcquireError> {
         let row = self.registered(stream)?;
         check_output_dir(&program.output_dir)?;
         let database = lock(&self.database)?;
+        if let Some(existing) = database.program_of_stream(row.id)? {
+            database.update_program(existing.id, program)?;
+            return Ok(existing.id);
+        }
         let id = database.insert_program(program)?;
         database.link_stream_to_program(row.id, id)?;
         Ok(id)
