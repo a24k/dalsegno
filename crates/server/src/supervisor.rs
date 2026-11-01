@@ -26,6 +26,14 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// stream for good and does not turn into a stream of yt-dlp calls either.
 const RETRY_BASE: Duration = Duration::from_secs(30);
 const RETRY_LIMIT: Duration = Duration::from_secs(600);
+/// A refusal of every address waits far longer, as each try is another request from an address
+/// the origin is already suspicious of. This matches how long a refused family is avoided.
+const REFUSED_BASE: Duration = Duration::from_secs(3600);
+const REFUSED_LIMIT: Duration = Duration::from_secs(6 * 3600);
+
+const FOLLOWING_FAILED: &str = "following failed, and is being retried";
+const ORIGIN_REFUSED: &str =
+    "the origin refused every address, which can mean a bot check, and is tried again in hours";
 
 const ACTIVE: [StreamState; 2] = [StreamState::Backfilling, StreamState::Recording];
 
@@ -57,13 +65,14 @@ pub struct Supervisor {
     follower: Arc<dyn Follower>,
     poll: Duration,
     retry_base: Duration,
+    refused_base: Duration,
     running: HashMap<i64, Running>,
     retries: HashMap<i64, Retry>,
 }
 
-fn delay_after(base: Duration, failures: u32) -> Duration {
+fn delay_after(base: Duration, limit: Duration, failures: u32) -> Duration {
     let doubled = base.saturating_mul(1 << failures.saturating_sub(1).min(16));
-    doubled.min(RETRY_LIMIT)
+    doubled.min(limit)
 }
 
 /// Records how a task ended, unless a person stopped the stream meanwhile.
@@ -87,6 +96,7 @@ fn record_with_notice(
     database: &Database,
     id: i64,
     state: StreamState,
+    words: &str,
     reason: &str,
     subject: &str,
     should_notify: bool,
@@ -97,19 +107,12 @@ fn record_with_notice(
             let title = database.stream(id)?.map(|row| row.stream.title);
             let body = json!({
                 "stream": title,
-                "message": format!("{}: {reason}", state_words(state)),
+                "message": format!("{words}: {reason}"),
             });
             database.enqueue_notification(STREAM, subject, &body.to_string(), now_ms())?;
         }
         Ok(())
     })
-}
-
-fn state_words(state: StreamState) -> &'static str {
-    match state {
-        StreamState::Ended => "the stream has ended",
-        _ => "following failed, and is being retried",
-    }
 }
 
 impl Supervisor {
@@ -120,6 +123,7 @@ impl Supervisor {
             follower,
             poll: POLL_INTERVAL,
             retry_base: RETRY_BASE,
+            refused_base: REFUSED_BASE,
             running: HashMap::new(),
             retries: HashMap::new(),
         }
@@ -185,31 +189,59 @@ impl Supervisor {
     }
 
     fn record(&mut self, id: i64, outcome: Result<FollowEnd, String>) -> Result<(), String> {
-        let database = lock(&self.database).map_err(|error| error.to_string())?;
-        let recorded = match &outcome {
+        match outcome {
             Ok(FollowEnd::Stopped) => Ok(()),
             Ok(FollowEnd::Ended(reason)) => {
+                let database = lock(&self.database).map_err(|error| error.to_string())?;
                 let subject = format!("stream:{id}:ended");
-                record_with_notice(&database, id, StreamState::Ended, reason, &subject, true)
-            }
-            Err(reason) => {
-                tracing::warn!(id, reason, "following failed");
-                let failures = self.retries.get(&id).map_or(0, |retry| retry.failures) + 1;
-                let at = Instant::now() + delay_after(self.retry_base, failures);
-                self.retries.insert(id, Retry { failures, at });
-                let subject = format!("stream:{id}:error:{}", now_ms());
-                let is_first = failures == 1;
+                let words = "the stream has ended";
                 record_with_notice(
                     &database,
                     id,
-                    StreamState::Error,
-                    reason,
+                    StreamState::Ended,
+                    words,
+                    &reason,
                     &subject,
-                    is_first,
+                    true,
                 )
+                .map_err(|error| error.to_string())
             }
-        };
-        recorded.map_err(|error| error.to_string())
+            Ok(FollowEnd::Refused(reason)) => {
+                let wait = (self.refused_base, REFUSED_LIMIT.max(self.refused_base));
+                self.record_failure(id, &reason, ORIGIN_REFUSED, wait)
+            }
+            Err(reason) => {
+                let wait = (self.retry_base, RETRY_LIMIT.max(self.retry_base));
+                self.record_failure(id, &reason, FOLLOWING_FAILED, wait)
+            }
+        }
+    }
+
+    /// Records a failure and when to try again. An outage alerts once, not on every retry.
+    fn record_failure(
+        &mut self,
+        id: i64,
+        reason: &str,
+        words: &str,
+        (base, limit): (Duration, Duration),
+    ) -> Result<(), String> {
+        tracing::warn!(id, reason, "following failed");
+        let failures = self.retries.get(&id).map_or(0, |retry| retry.failures) + 1;
+        let at = Instant::now() + delay_after(base, limit, failures);
+        self.retries.insert(id, Retry { failures, at });
+        let database = lock(&self.database).map_err(|error| error.to_string())?;
+        let subject = format!("stream:{id}:error:{}", now_ms());
+        let is_first = failures == 1;
+        record_with_notice(
+            &database,
+            id,
+            StreamState::Error,
+            words,
+            reason,
+            &subject,
+            is_first,
+        )
+        .map_err(|error| error.to_string())
     }
 
     /// Gives failed streams another go when their wait is over. A stream that failed before a
@@ -307,6 +339,7 @@ mod tests {
             follower: Arc::new(Arc::clone(follower)),
             poll: Duration::from_millis(5),
             retry_base: Duration::from_millis(5),
+            refused_base: Duration::from_millis(5),
             running: HashMap::new(),
             retries: HashMap::new(),
         }
@@ -477,6 +510,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_stream_waits_far_longer_and_says_why() {
+        let (database, id) = database_with_stream(StreamState::Recording);
+        let follower = Arc::new(Scripted::default());
+        follower
+            .ends
+            .lock()
+            .unwrap()
+            .push(Ok(FollowEnd::Refused("no usable IP family".to_string())));
+        let (stop, shutdown) = watch::channel(false);
+        let mut watched = supervisor(&database, &follower);
+        watched.refused_base = Duration::from_secs(3600);
+        let running = tokio::spawn(watched.run(shutdown));
+
+        until(|| state(&database, id).0 == StreamState::Error).await;
+        sleep(Duration::from_millis(40)).await;
+        stop.send(true).unwrap();
+        running.await.unwrap();
+
+        assert_eq!(follower.started.load(Ordering::SeqCst), 1);
+        assert_eq!(state(&database, id).0, StreamState::Error);
+        let body = lock(&database).unwrap().pending_notifications(1).unwrap()[0]
+            .body
+            .clone();
+        assert!(body.contains("bot check"), "{body}");
+    }
+
+    #[tokio::test]
     async fn a_failure_after_a_pause_keeps_the_pause() {
         let (database, id) = database_with_stream(StreamState::Paused);
 
@@ -487,8 +547,9 @@ mod tests {
 
     #[test]
     fn waits_double_up_to_the_limit() {
-        assert_eq!(delay_after(RETRY_BASE, 1), RETRY_BASE);
-        assert_eq!(delay_after(RETRY_BASE, 2), RETRY_BASE * 2);
-        assert_eq!(delay_after(RETRY_BASE, 500), RETRY_LIMIT);
+        assert_eq!(delay_after(RETRY_BASE, RETRY_LIMIT, 1), RETRY_BASE);
+        assert_eq!(delay_after(RETRY_BASE, RETRY_LIMIT, 2), RETRY_BASE * 2);
+        assert_eq!(delay_after(RETRY_BASE, RETRY_LIMIT, 500), RETRY_LIMIT);
+        assert_eq!(delay_after(REFUSED_BASE, REFUSED_LIMIT, 500), REFUSED_LIMIT);
     }
 }

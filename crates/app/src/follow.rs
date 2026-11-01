@@ -50,6 +50,8 @@ pub enum FollowEnd {
     Stopped,
     /// The stream finished, for the reason given.
     Ended(String),
+    /// The origin refused every address, so trying again soon would only make that worse.
+    Refused(String),
 }
 
 /// Follows the stream until it is told to stop, it ends, or it fails.
