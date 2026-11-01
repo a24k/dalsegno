@@ -35,6 +35,7 @@ pub struct FakeResolver {
     pub expire: AtomicU64,
     pub calls: AtomicU64,
     pub errors: Mutex<VecDeque<ResolveError>>,
+    pub fail_after_first: Mutex<Option<(ResolveError, usize)>>,
 }
 
 impl FakeResolver {
@@ -53,6 +54,15 @@ impl Resolver for FakeResolver {
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some(error) = self.errors.lock().unwrap().pop_front() {
             return Err(error);
+        }
+        if call > 1 {
+            let mut failing = self.fail_after_first.lock().unwrap();
+            if let Some((error, left)) = failing.as_mut()
+                && *left > 0
+            {
+                *left -= 1;
+                return Err(error.clone());
+            }
         }
         let expire = self.expire.load(Ordering::SeqCst);
         Ok(Redacted::new(format!(
@@ -88,6 +98,7 @@ impl Harness {
             expire: AtomicU64::new(START + LONG_LIFETIME),
             calls: AtomicU64::new(0),
             errors: Mutex::new(VecDeque::new()),
+            fail_after_first: Mutex::new(None),
         });
         let database = Database::open_in_memory().unwrap();
         let stream_id = database
@@ -112,6 +123,11 @@ impl Harness {
             now: Arc::new(AtomicU64::new(START)),
             data: tempfile::tempdir().unwrap(),
         }
+    }
+
+    /// Lets the first `resolve` succeed, and fails the next `count`.
+    pub fn fail_resolves_after_first(&self, error: ResolveError, count: usize) {
+        *self.resolver.fail_after_first.lock().unwrap() = Some((error, count));
     }
 
     pub fn video() -> VideoId {

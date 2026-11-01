@@ -10,6 +10,8 @@ pub mod export;
 pub mod family;
 pub mod features;
 pub mod fetch;
+pub mod follow;
+pub mod lifecycle;
 pub mod offline;
 pub mod probe;
 pub mod retention;

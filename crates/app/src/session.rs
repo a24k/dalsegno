@@ -137,6 +137,13 @@ impl<R: Resolver> Session<R> {
         Ok(lease)
     }
 
+    /// Drops the lease, so the next one asks yt-dlp again. This is not a refusal.
+    pub async fn refresh(&self) {
+        let mut state = self.state.lock().await;
+        state.held = None;
+        state.generation += 1;
+    }
+
     /// Reports a refusal: refresh the URL, then switch family, then give up (FR-A5).
     pub async fn report_refused(&self, lease: &Lease) -> Result<(), AcquireError> {
         let mut state = self.state.lock().await;
