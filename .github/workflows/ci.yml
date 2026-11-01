@@ -12,6 +12,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --tag dalsegno .
+      - name: Every tool is in the image
+        run: |
+          docker run --rm dalsegno dalsegno --json doctor \
+            | jq --exit-status '.tools | all(.path != null)'
+      - name: The service starts and stops on its stop signal
+        run: |
+          docker run --detach --name dalsegno dalsegno
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if docker exec dalsegno sh -c 'test -f /data/dalsegno.sqlite3'; then
+              break
+            fi
+            sleep 1
+          done
+          docker stop --time 20 dalsegno
+          test "$(docker inspect --format '{{.State.ExitCode}}' dalsegno)" = 0
+
   check:
     runs-on: ubuntu-latest
     steps:
