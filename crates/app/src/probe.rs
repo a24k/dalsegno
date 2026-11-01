@@ -141,10 +141,11 @@ async fn read_stream_info<R: Resolver>(
         match resolver.stream_info(video, used).await {
             Ok(info) => return Ok((info, used)),
             Err(ResolveError::BotCheck) => {
-                let transition = family
-                    .lock()
-                    .await
-                    .on_origin_failure(clock(), SwitchReason::BotCheck);
+                let transition =
+                    family
+                        .lock()
+                        .await
+                        .on_origin_failure(used, clock(), SwitchReason::BotCheck);
                 if transition == Transition::Exhausted {
                     return Err(AcquireError::FamilyExhausted(used));
                 }

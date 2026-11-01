@@ -256,7 +256,12 @@ impl Acquisition {
     ) -> Result<FollowEnd, AcquireError> {
         let fetcher = self.fetcher(library, row, row.stream.audio_itag)?;
         let policy = FollowPolicy::for_fragment_length(row.stream.fragment_len);
-        follow(Arc::new(fetcher), policy, stop).await
+        match follow(Arc::new(fetcher), policy, stop).await {
+            Err(error @ AcquireError::FamilyExhausted(_)) => {
+                Ok(FollowEnd::Refused(error.to_string()))
+            }
+            other => other,
+        }
     }
 
     pub(crate) fn fetcher(
