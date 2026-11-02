@@ -58,6 +58,10 @@ dalsegno start <id>
 dalsegno stop  <id>
 ```
 
+A running job that reports progress shows its share done and, from its pace so far, about how
+long is left. So far only backfill reports, after each 500 fragments, and the API returns it as
+`progress` from 0 to 1.
+
 Offline commands read files and never need the service (FR-N11). Passing `--env` selects
 offline mode; otherwise `scan` and `diff` call the API:
 
