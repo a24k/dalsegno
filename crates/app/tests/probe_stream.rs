@@ -24,6 +24,8 @@ const AAC_LC: &str = "mp4a.40.2";
 
 struct FakeResolver {
     info: StreamInfo,
+    /// What IPv4 is told, when it differs.
+    v4_info: Option<StreamInfo>,
     errors: Mutex<VecDeque<ResolveError>>,
     families: Mutex<Vec<IpFamily>>,
 }
@@ -32,8 +34,16 @@ impl FakeResolver {
     fn new(info: StreamInfo) -> Self {
         Self {
             info,
+            v4_info: None,
             errors: Mutex::new(VecDeque::new()),
             families: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn by_family(v6_info: StreamInfo, v4_info: StreamInfo) -> Self {
+        Self {
+            v4_info: Some(v4_info),
+            ..Self::new(v6_info)
         }
     }
 
@@ -62,7 +72,10 @@ impl Resolver for FakeResolver {
         self.families.lock().unwrap().push(family);
         match self.errors.lock().unwrap().pop_front() {
             Some(error) => Err(error),
-            None => Ok(self.info.clone()),
+            None => Ok(match (&self.v4_info, family) {
+                (Some(v4_info), IpFamily::V4) => v4_info.clone(),
+                _ => self.info.clone(),
+            }),
         }
     }
 }
@@ -130,6 +143,16 @@ async fn origin() -> MockServer {
     server
 }
 
+/// An origin that tells the head and refuses every fragment.
+async fn refusing_origin() -> MockServer {
+    let server = origin().await;
+    Mock::given(wiremock::matchers::method("GET"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    server
+}
+
 async fn serve_garbage(server: &MockServer) {
     Mock::given(wiremock::matchers::method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"garbage".to_vec()))
@@ -185,6 +208,63 @@ async fn refused_fragments_name_the_status() {
         .unwrap();
 
     assert_eq!(report.rejected[0].reason, "status 403 with 0 bytes");
+    assert!(report.rejected[0].refused);
+}
+
+#[tokio::test]
+async fn fragments_refused_on_one_family_move_the_probe_to_the_other() {
+    let refusing = refusing_origin().await;
+    let working = origin().await;
+    serve_garbage(&working).await;
+    let resolver = FakeResolver::by_family(audio_and_video(&refusing), audio_and_video(&working));
+
+    let report = probe(&resolver, &missing_tools(), &family(IpPolicy::V6First))
+        .await
+        .unwrap();
+
+    assert_eq!(report.family, IpFamily::V4);
+    assert_eq!(
+        *resolver.families.lock().unwrap(),
+        [IpFamily::V6, IpFamily::V4]
+    );
+    assert!(report.rejected.iter().all(|item| !item.refused));
+}
+
+#[tokio::test]
+async fn fragments_refused_with_no_other_family_are_reported() {
+    // Held to the end: a dropped server's port can go to another test's server.
+    let refusing = refusing_origin().await;
+    let resolver = FakeResolver::new(audio_and_video(&refusing));
+
+    let report = probe(&resolver, &missing_tools(), &family(IpPolicy::V4Only))
+        .await
+        .unwrap();
+
+    assert_eq!(*resolver.families.lock().unwrap(), [IpFamily::V4]);
+    assert_eq!(report.rejected.len(), 2);
+    assert!(
+        report.rejected.iter().all(|item| item.refused),
+        "{:?}",
+        report.rejected
+    );
+}
+
+#[tokio::test]
+async fn one_refused_format_does_not_move_the_probe() {
+    let server = origin().await;
+    Mock::given(path("/140"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    serve_garbage(&server).await;
+    let resolver = FakeResolver::new(audio_and_video(&server));
+
+    let report = probe(&resolver, &missing_tools(), &family(IpPolicy::V6First))
+        .await
+        .unwrap();
+
+    assert_eq!(report.family, IpFamily::V6);
+    assert_eq!(*resolver.families.lock().unwrap(), [IpFamily::V6]);
 }
 
 #[tokio::test]

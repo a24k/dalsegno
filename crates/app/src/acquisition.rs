@@ -193,8 +193,9 @@ impl Acquisition {
     pub async fn add(&self, library: &Library, stream: &str) -> Result<AddReport, AcquireError> {
         let video = parse_stream(stream)?;
         let probe = self.probe(stream).await?;
-        let audio = probe.audio.as_ref().ok_or(AcquireError::NoAudio)?;
-        let fragment_len = probe.fragment_seconds.ok_or(AcquireError::NoAudio)?;
+        let no_audio = || AcquireError::NoAudio(probe.why_no_audio());
+        let audio = probe.audio.as_ref().ok_or_else(no_audio)?;
+        let fragment_len = probe.fragment_seconds.ok_or_else(no_audio)?;
         let row = NewStream {
             video_id: video.to_string(),
             title: probe.title.clone(),

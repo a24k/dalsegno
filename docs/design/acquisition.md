@@ -135,6 +135,10 @@ of every format, so probing needs no further yt-dlp call.
 - **Video:** at most four candidates, best first. ffprobe confirms that both fragments start
   with a keyframe and that joining them keeps every packet, and ffmpeg must copy the join into
   an mp4. Using these tools covers WebM and mp4 sources without more parsing code.
+- **Refusal:** when the origin refuses every format tried, with fresh URLs, that is a
+  persistent refusal of the family (D-26), and probing starts again on the other one if the
+  policy allows it. A refusal of some formats only rejects those formats.
+- **Failure:** `add` names why each format failed, as `probe` does.
 
 ## Container reader
 

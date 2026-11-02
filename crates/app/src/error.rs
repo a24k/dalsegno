@@ -39,9 +39,9 @@ pub enum AcquireError {
     /// An envelope could not be built or read.
     #[error("envelope: {0}")]
     Envelope(String),
-    /// The probe found no usable audio.
-    #[error("no audio format passed its checks")]
-    NoAudio,
+    /// The probe found no usable audio, with why each format failed.
+    #[error("no audio format passed its checks: {0}")]
+    NoAudio(String),
     /// The HTTP client failed outside a fragment request.
     #[error("HTTP client failed: {0}")]
     Transport(#[from] TransportError),
