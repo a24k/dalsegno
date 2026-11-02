@@ -2,7 +2,7 @@
 //!
 //! Text input is validated here, before any external call.
 
-use crate::backfill::{BackfillReport, backfill};
+use crate::backfill::{BackfillReport, Progress, backfill};
 use crate::doctor::{DoctorReport, run_doctor};
 use crate::error::AcquireError;
 use crate::family::{FamilyController, SharedFamily};
@@ -235,16 +235,17 @@ impl Acquisition {
         Ok(report)
     }
 
-    /// Fills the last `hours` of a stream's audio.
+    /// Fills the last `hours` of a stream's audio, telling `progress` how far it has come.
     pub async fn backfill(
         &self,
         library: &Library,
         stream: &str,
         hours: f64,
+        progress: &(dyn Fn(Progress) + Sync),
     ) -> Result<BackfillReport, AcquireError> {
         let row = library.registered(stream)?;
         let fetcher = self.fetcher(library, &row, row.stream.audio_itag)?;
-        backfill(Arc::new(fetcher), row.stream.fragment_len, hours).await
+        backfill(Arc::new(fetcher), row.stream.fragment_len, hours, progress).await
     }
 
     /// Follows a stream's audio until `stop` turns true, the stream ends, or following fails.
@@ -360,7 +361,9 @@ mod tests {
             Err(AcquireError::NotRegistered(_))
         ));
         assert!(matches!(
-            acquisition().backfill(&library, "abcDEF123_-", 1.0).await,
+            acquisition()
+                .backfill(&library, "abcDEF123_-", 1.0, &|_| {})
+                .await,
             Err(AcquireError::NotRegistered(_))
         ));
     }

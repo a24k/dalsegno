@@ -3,7 +3,8 @@
 mod common;
 
 use common::*;
-use dalsegno_app::backfill::backfill;
+use dalsegno_app::backfill::{Progress, backfill};
+use std::sync::Mutex;
 
 const HEAD: u64 = 100;
 /// Three 5-second fragments, so the window is `sq` 97 to 99.
@@ -18,15 +19,23 @@ async fn harness() -> Harness {
     harness
 }
 
-async fn run(
+async fn run_watching(
     harness: &Harness,
     hours: f64,
+    progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<dalsegno_app::backfill::BackfillReport, AcquireError> {
     let limits = FetchLimits {
         concurrency: 1,
         requests_per_second: 10_000.0,
     };
-    backfill(Arc::new(harness.fetcher(limits)), 5.0, hours).await
+    backfill(Arc::new(harness.fetcher(limits)), 5.0, hours, progress).await
+}
+
+async fn run(
+    harness: &Harness,
+    hours: f64,
+) -> Result<dalsegno_app::backfill::BackfillReport, AcquireError> {
+    run_watching(harness, hours, &|_| {}).await
 }
 
 fn open_gaps(harness: &Harness) -> Vec<(u64, u64)> {
@@ -72,6 +81,26 @@ async fn fills_the_window_behind_the_head() {
     assert_eq!((report.head_sq, report.fetched), (HEAD, 3));
     assert_eq!(harness.rows(97, 99).len(), 3);
     assert_eq!(gap_statuses(&harness), [(97, 99, "filled".to_string())]);
+}
+
+#[tokio::test]
+async fn progress_runs_from_nothing_to_everything_missing() {
+    let harness = harness().await;
+    harness.add_row(98);
+    serve_fragment(&harness.server, 97).await;
+    serve_fragment(&harness.server, 99).await;
+    let seen = Mutex::new(Vec::new());
+
+    run_watching(&harness, HOURS, &|progress| {
+        seen.lock().unwrap().push(progress)
+    })
+    .await
+    .unwrap();
+
+    let seen = seen.into_inner().unwrap();
+    assert_eq!(seen.first(), Some(&Progress { done: 0, total: 2 }));
+    assert_eq!(seen.last(), Some(&Progress { done: 2, total: 2 }));
+    assert!(seen.windows(2).all(|pair| pair[0].done <= pair[1].done));
 }
 
 #[tokio::test]

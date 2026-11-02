@@ -11,7 +11,7 @@ use dalsegno_io::webhook::Webhook;
 use dalsegno_store::jobs::JobRow;
 use dalsegno_store::streams::StreamRow;
 use notifier::Notifier;
-use runner::{JobFuture, JobHandler, JobRunner};
+use runner::{JobFuture, JobHandler, JobRunner, record_progress};
 use scheduler::{SWEEP, run_scheduler};
 use std::sync::Arc;
 use supervisor::{FollowFuture, Follower, Supervisor};
@@ -48,11 +48,14 @@ impl Service {
         let target = StreamTarget::parse(&job.job.target).ok_or_else(invalid)?;
         let stream = target.stream.as_str();
         let done = match kind {
-            BACKFILL => self
-                .acquisition
-                .backfill(&self.library, stream, DEFAULT_HOURS)
-                .await
-                .map(drop),
+            BACKFILL => {
+                let database = self.library.database();
+                let progress = |progress| record_progress(&database, job.id, progress);
+                self.acquisition
+                    .backfill(&self.library, stream, DEFAULT_HOURS, &progress)
+                    .await
+                    .map(drop)
+            }
             FEATURES => self.library.features(stream).await.map(drop),
             ANALYSIS => self.library.analyse(stream).await.map(drop),
             other => return Err(format!("unknown job kind {other}")),
