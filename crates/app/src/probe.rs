@@ -3,6 +3,7 @@
 use crate::error::AcquireError;
 use crate::family::{SharedFamily, SwitchReason, Transition};
 use crate::session::Clock;
+use dalsegno_core::acquisition::{Outcome, ResponseFacts, classify};
 use dalsegno_core::container::{parse_mp4_fragment, read_timing};
 pub use dalsegno_core::format::FormatInfo;
 
@@ -39,6 +40,30 @@ pub struct Rejection {
     pub itag: u32,
     /// What failed.
     pub reason: String,
+    /// Whether the origin refused the request, rather than the content failing a check.
+    pub refused: bool,
+}
+
+/// Why one format failed, before it is tied to its format.
+#[derive(Debug)]
+struct Failure {
+    reason: String,
+    refused: bool,
+}
+
+impl From<String> for Failure {
+    fn from(reason: String) -> Self {
+        Self {
+            reason,
+            refused: false,
+        }
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(reason: &str) -> Self {
+        reason.to_string().into()
+    }
 }
 
 /// What was learned about a stream. Holds no URL.
@@ -68,8 +93,58 @@ pub struct ProbeReport {
     pub rejected: Vec<Rejection>,
 }
 
-/// Reads a stream's metadata, then checks formats until one audio and one video pass.
+impl ProbeReport {
+    /// Whether the origin refused every format tried, which says more about the family than
+    /// about the formats.
+    pub fn is_refused(&self) -> bool {
+        self.audio.is_none()
+            && self.video.is_none()
+            && !self.rejected.is_empty()
+            && self.rejected.iter().all(|rejection| rejection.refused)
+    }
+
+    /// Why no audio format was chosen, one format at a time.
+    pub fn why_no_audio(&self) -> String {
+        if self.rejected.is_empty() {
+            return "no audio format was offered".to_string();
+        }
+        self.rejected
+            .iter()
+            .map(|rejection| format!("itag {}: {}", rejection.itag, rejection.reason))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+/// Reads a stream's metadata, then checks formats until one audio and one video pass. When the
+/// origin refuses every format, the family counts as refused and the probe starts again on the
+/// next one, as following does (D-26).
 pub async fn probe_stream<R: Resolver>(
+    resolver: &R,
+    client: &FragmentClient,
+    tools: &ProbeTools,
+    video: &VideoId,
+    family: &SharedFamily,
+    clock: &Clock,
+) -> Result<ProbeReport, AcquireError> {
+    loop {
+        let report = probe_once(resolver, client, tools, video, family, clock).await?;
+        if !report.is_refused() {
+            return Ok(report);
+        }
+        let transition = family.lock().await.on_origin_failure(
+            report.family,
+            clock(),
+            SwitchReason::PersistentRefusal,
+        );
+        match transition {
+            Transition::Switched(next) if next != report.family => continue,
+            Transition::Switched(_) | Transition::Exhausted => return Ok(report),
+        }
+    }
+}
+
+async fn probe_once<R: Resolver>(
     resolver: &R,
     client: &FragmentClient,
     tools: &ProbeTools,
@@ -123,10 +198,11 @@ pub async fn probe_stream<R: Resolver>(
     })
 }
 
-fn rejection(format: &StreamFormat, reason: String) -> Rejection {
+fn rejection(format: &StreamFormat, failure: Failure) -> Rejection {
     Rejection {
         itag: format.info.itag,
-        reason,
+        reason: failure.reason,
+        refused: failure.refused,
     }
 }
 
@@ -203,7 +279,7 @@ async fn fetch_pair(
     format: &StreamFormat,
     family: IpFamily,
     head_sq: u64,
-) -> Result<(Vec<u8>, Vec<u8>), String> {
+) -> Result<(Vec<u8>, Vec<u8>), Failure> {
     let first = head_sq
         .checked_sub(PROBE_DISTANCE_FROM_HEAD)
         .ok_or("the stream is too short to probe")?;
@@ -211,16 +287,25 @@ async fn fetch_pair(
         let response = client
             .get(&format.url, sq, family)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| Failure::from(error.to_string()))?;
         if response.status == 200 && !response.body.is_empty() {
-            Ok(response.body)
-        } else {
-            Err(format!(
+            return Ok(response.body);
+        }
+        let facts = ResponseFacts {
+            status: response.status,
+            body_len: response.body.len(),
+            head_seqnum: response.head_seqnum,
+            sequence_num: response.sequence_num,
+        };
+        Err(Failure {
+            reason: format!(
                 "status {} with {} bytes",
                 response.status,
                 response.body.len()
-            ))
-        }
+            ),
+            // The URL is fresh, so a refusal here is what following treats as a refusal.
+            refused: classify(sq, facts) == Outcome::RefreshUrl,
+        })
     };
     Ok((fetch(first).await?, fetch(first + 1).await?))
 }
@@ -230,9 +315,9 @@ async fn probe_audio(
     format: &StreamFormat,
     family: IpFamily,
     head_sq: u64,
-) -> Result<f64, String> {
+) -> Result<f64, Failure> {
     let (first, second) = fetch_pair(client, format, family, head_sq).await?;
-    check_audio_pair(&first, &second)
+    Ok(check_audio_pair(&first, &second)?)
 }
 
 async fn probe_video(
@@ -241,9 +326,9 @@ async fn probe_video(
     format: &StreamFormat,
     family: IpFamily,
     head_sq: u64,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     let (first, second) = fetch_pair(client, format, family, head_sq).await?;
-    check_video_pair(tools, &first, &second).await
+    Ok(check_video_pair(tools, &first, &second).await?)
 }
 
 /// Checks that two adjacent fragments are contiguous AAC-LC, and returns the first's duration.
@@ -316,6 +401,49 @@ mod tests {
             ffprobe: dalsegno_io::tools::find_program("ffprobe")?,
             ffmpeg: dalsegno_io::tools::find_program("ffmpeg")?,
         })
+    }
+
+    fn report_rejecting(rejected: Vec<Rejection>) -> ProbeReport {
+        ProbeReport {
+            title: "Example TV".to_string(),
+            short_name: "Example TV".to_string(),
+            channel: None,
+            channel_id: None,
+            thumbnail: None,
+            family: IpFamily::V4,
+            head_sq: 100,
+            fragment_seconds: None,
+            audio: None,
+            video: None,
+            rejected,
+        }
+    }
+
+    fn refused(itag: u32) -> Rejection {
+        Rejection {
+            itag,
+            reason: "status 403 with 0 bytes".to_string(),
+            refused: true,
+        }
+    }
+
+    #[test]
+    fn a_report_without_audio_says_why_each_format_failed() {
+        let report = report_rejecting(vec![refused(140), refused(248)]);
+
+        assert_eq!(
+            report.why_no_audio(),
+            "itag 140: status 403 with 0 bytes; itag 248: status 403 with 0 bytes"
+        );
+        assert!(report.is_refused());
+    }
+
+    #[test]
+    fn a_report_with_no_formats_tried_is_not_refused() {
+        let report = report_rejecting(Vec::new());
+
+        assert_eq!(report.why_no_audio(), "no audio format was offered");
+        assert!(!report.is_refused());
     }
 
     #[test]
