@@ -18,4 +18,5 @@ pub mod offline;
 pub mod probe;
 pub mod remote;
 pub mod retention;
+pub mod schedule;
 pub mod session;

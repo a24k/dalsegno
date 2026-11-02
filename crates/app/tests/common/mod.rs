@@ -6,6 +6,7 @@ pub use dalsegno_app::family::{FamilyController, SharedFamily};
 pub use dalsegno_app::fetch::{
     FetchLimits, FetchRange, FetchReport, Fetcher, Ledger, RetryPolicy, SharedDatabase, fetch_range,
 };
+pub use dalsegno_app::schedule::{Priority, Requests, Scheduler};
 pub use dalsegno_app::session::{Clock, Session};
 pub use dalsegno_core::redact::Redacted;
 pub use dalsegno_core::stream::{IpFamily, IpPolicy, VideoId};
@@ -139,8 +140,21 @@ impl Harness {
     }
 
     // Both families bind to loopback, because the mock listens on IPv4 only.
-    pub fn fetcher(&self, limits: FetchLimits) -> Fetcher<FakeResolver> {
+    pub fn requests(limits: FetchLimits) -> Requests {
         let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let client = FragmentClient::new(BindAddresses {
+            v4: loopback,
+            v6: loopback,
+        })
+        .unwrap();
+        Requests::new(client, Scheduler::new(limits), Priority::Prefetch)
+    }
+
+    pub fn fetcher(&self, limits: FetchLimits) -> Fetcher<FakeResolver> {
+        self.fetcher_with(Self::requests(limits))
+    }
+
+    pub fn fetcher_with(&self, requests: Requests) -> Fetcher<FakeResolver> {
         let now = Arc::clone(&self.now);
         let clock: Clock = Arc::new(move || now.load(Ordering::SeqCst));
         Fetcher {
@@ -159,13 +173,8 @@ impl Harness {
                 clock,
                 Duration::from_millis(1),
             ),
-            client: FragmentClient::new(BindAddresses {
-                v4: loopback,
-                v6: loopback,
-            })
-            .unwrap(),
+            requests,
             store: self.store(),
-            limits,
             retry: RetryPolicy {
                 base_delay: Duration::from_millis(1),
                 max_attempts: 4,

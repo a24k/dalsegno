@@ -22,6 +22,7 @@ tracing.workspace = true
 [dev-dependencies]
 dalsegno-test-support.workspace = true
 rusqlite.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 wiremock.workspace = true
 
 [lints]

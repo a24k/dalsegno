@@ -15,6 +15,7 @@ use crate::follow::{FollowEnd, FollowPolicy, follow};
 use crate::monitor::{MonitorReport, run_pass};
 use crate::probe::{ProbeReport, ProbeTools, probe_stream};
 use crate::retention::{SweepReport, sweep};
+use crate::schedule::{Priority, Requests, Scheduler};
 use crate::session::{Clock, Session, system_clock};
 pub use dalsegno_core::stream::IpPolicy;
 
@@ -39,12 +40,14 @@ const WORK_DIRECTORY: &str = "work";
 const MILLIS_PER_SECOND: i64 = 1_000;
 
 /// Settings shared by the acquisition use cases.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AcquisitionOptions {
     /// IP family policy.
     pub policy: IpPolicy,
     /// Cookie file for yt-dlp.
     pub cookies: Option<PathBuf>,
+    /// The request budget, shared by every stream and job.
+    pub limits: FetchLimits,
 }
 
 /// The database and fragment files under one data directory.
@@ -145,7 +148,8 @@ pub struct AddReport {
 #[derive(Debug, Clone)]
 pub struct Acquisition {
     resolver: Arc<YtDlp>,
-    client: FragmentClient,
+    /// Every request of every use case, within one budget (FR-A8).
+    requests: Requests,
     family: SharedFamily,
     has_ipv6: bool,
 }
@@ -153,11 +157,13 @@ pub struct Acquisition {
 impl Acquisition {
     /// Detects the IPv6 route and builds the adapters.
     pub fn new(options: AcquisitionOptions) -> Result<Self, AcquireError> {
+        options.limits.validate()?;
         let has_ipv6 = has_ipv6_route();
         let program = find_program(YT_DLP).unwrap_or_else(|| PathBuf::from(YT_DLP));
+        let client = FragmentClient::new(BindAddresses::default())?;
         Ok(Self {
             resolver: Arc::new(YtDlp::new(program, options.cookies)),
-            client: FragmentClient::new(BindAddresses::default())?,
+            requests: Requests::new(client, Scheduler::new(options.limits), Priority::Prefetch),
             family: FamilyController::new(options.policy, has_ipv6).shared(),
             has_ipv6,
         })
@@ -171,6 +177,7 @@ impl Acquisition {
             self.resolver.as_ref(),
             &family,
             self.has_ipv6,
+            self.requests.limits(),
             video.as_ref(),
         )
         .await)
@@ -186,7 +193,7 @@ impl Acquisition {
         let clock = system_clock();
         probe_stream(
             self.resolver.as_ref(),
-            &self.client,
+            &self.requests.at(Priority::Prefetch),
             &tools,
             &video,
             &self.family,
@@ -224,7 +231,7 @@ impl Acquisition {
         request: FetchRequest,
     ) -> Result<FetchReport, AcquireError> {
         let row = library.registered(&request.stream)?;
-        let fetcher = Arc::new(self.fetcher(library, &row, request.itag)?);
+        let fetcher = Arc::new(self.fetcher(library, &row, request.itag, Priority::Prefetch)?);
         let range = FetchRange {
             stream_id: row.id,
             itag: request.itag,
@@ -251,7 +258,7 @@ impl Acquisition {
         progress: &(dyn Fn(Progress) + Sync),
     ) -> Result<BackfillReport, AcquireError> {
         let row = library.registered(stream)?;
-        let fetcher = self.fetcher(library, &row, row.stream.audio_itag)?;
+        let fetcher = self.fetcher(library, &row, row.stream.audio_itag, Priority::Backfill)?;
         backfill(Arc::new(fetcher), row.stream.fragment_len, hours, progress).await
     }
 
@@ -262,7 +269,7 @@ impl Acquisition {
         row: &StreamRow,
         stop: watch::Receiver<bool>,
     ) -> Result<FollowEnd, AcquireError> {
-        let fetcher = self.fetcher(library, row, row.stream.audio_itag)?;
+        let fetcher = self.fetcher(library, row, row.stream.audio_itag, Priority::Follow)?;
         let policy = FollowPolicy::for_fragment_length(row.stream.fragment_len);
         match follow(Arc::new(fetcher), policy, stop).await {
             Err(error @ AcquireError::FamilyExhausted(_)) => {
@@ -277,6 +284,7 @@ impl Acquisition {
         library: &Library,
         row: &StreamRow,
         itag: u32,
+        priority: Priority,
     ) -> Result<Fetcher<YtDlp>, AcquireError> {
         let video = parse_stream(&row.stream.video_id)?;
         let clock: Clock = system_clock();
@@ -289,9 +297,8 @@ impl Acquisition {
                 Arc::clone(&clock),
                 RetryPolicy::default().base_delay,
             ),
-            client: self.client.clone(),
+            requests: self.requests.at(priority),
             store: library.store.clone(),
-            limits: FetchLimits::default(),
             retry: RetryPolicy::default(),
             ledger: Ledger {
                 database: Arc::clone(&library.database),
@@ -327,6 +334,7 @@ mod tests {
         Acquisition::new(AcquisitionOptions {
             policy: IpPolicy::V4Only,
             cookies: None,
+            limits: FetchLimits::default(),
         })
         .unwrap()
     }
@@ -432,6 +440,23 @@ mod tests {
                 "{error}"
             );
         });
+    }
+
+    #[test]
+    fn limits_that_would_stop_every_request_are_rejected_at_start() {
+        let options = AcquisitionOptions {
+            policy: IpPolicy::V4Only,
+            cookies: None,
+            limits: FetchLimits {
+                concurrency: 0,
+                requests_per_second: 4.0,
+            },
+        };
+
+        assert!(matches!(
+            Acquisition::new(options),
+            Err(AcquireError::InvalidRequest(_))
+        ));
     }
 
     #[tokio::test]

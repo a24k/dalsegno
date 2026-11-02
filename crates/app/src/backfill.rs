@@ -60,7 +60,7 @@ pub async fn backfill<R: Resolver>(
         return Err(AcquireError::InvalidRequest("hours must be from 0 to 120"));
     }
     let lease = fetcher.session.lease().await?;
-    let head_sq = read_head(&fetcher.client, &lease.url, lease.family).await?;
+    let head_sq = read_head(&fetcher.requests, &lease.url, lease.family).await?;
     let wanted = ((hours * SECONDS_PER_HOUR / fragment_len).ceil() as u64).min(MAX_RANGE_FRAGMENTS);
     let first = head_sq.saturating_sub(wanted).max(1);
     record_missing(&fetcher, first, head_sq.saturating_sub(1))?;

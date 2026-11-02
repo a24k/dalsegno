@@ -2,11 +2,12 @@
 //! a complete file, and fragments with a row are skipped, so a rerun resumes (FR-A7).
 
 use crate::error::AcquireError;
+use crate::schedule::Requests;
 use crate::session::{Clock, Session};
 use dalsegno_core::acquisition::{Outcome, ResponseFacts, backoff_delay, classify};
 use dalsegno_core::container::{FragmentTiming, read_timing};
 use dalsegno_io::fragments::FragmentStore;
-use dalsegno_io::http::{FragmentClient, FragmentResponse};
+use dalsegno_io::http::FragmentResponse;
 use dalsegno_io::ytdlp::Resolver;
 use dalsegno_store::database::Database;
 use dalsegno_store::fragments::{FragmentRow, HeadSample};
@@ -17,7 +18,6 @@ use std::sync::{Arc, MutexGuard};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task::{JoinSet, spawn_blocking};
-use tokio::time::Instant;
 
 /// More than 120 hours of fragments, even at a fragment length well under 5 s.
 pub const MAX_RANGE_FRAGMENTS: u64 = 100_000;
@@ -39,7 +39,7 @@ pub struct FetchRange {
 }
 
 /// Request limits. Defaults stay under the measured ceiling of about 5 per second.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct FetchLimits {
     /// Requests in flight.
     pub concurrency: usize,
@@ -53,6 +53,21 @@ impl Default for FetchLimits {
             concurrency: 4,
             requests_per_second: 4.0,
         }
+    }
+}
+
+impl FetchLimits {
+    /// Rejects limits that would stop every request or overflow the pacing.
+    pub fn validate(&self) -> Result<(), AcquireError> {
+        if self.concurrency == 0 {
+            return Err(AcquireError::InvalidRequest("concurrency must be positive"));
+        }
+        if !REQUEST_RATES.contains(&self.requests_per_second) {
+            return Err(AcquireError::InvalidRequest(
+                "the request rate is out of range",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -122,12 +137,10 @@ pub struct Ledger {
 pub struct Fetcher<R> {
     /// Lease handling for the stream and format being fetched.
     pub session: Session<R>,
-    /// HTTP client.
-    pub client: FragmentClient,
+    /// Requests within the shared budget, at this work's priority.
+    pub requests: Requests,
     /// Destination.
     pub store: FragmentStore,
-    /// Request limits.
-    pub limits: FetchLimits,
     /// Retry behaviour.
     pub retry: RetryPolicy,
     /// Database records.
@@ -141,7 +154,7 @@ impl<R> fmt::Debug for Fetcher<R> {
         formatter
             .debug_struct("Fetcher")
             .field("session", &self.session)
-            .field("limits", &self.limits)
+            .field("requests", &self.requests)
             .finish_non_exhaustive()
     }
 }
@@ -154,36 +167,10 @@ enum FragmentResult {
 }
 
 #[derive(Debug)]
-struct Pacer {
-    interval: Duration,
-    next: Mutex<Instant>,
-}
-
-impl Pacer {
-    fn new(requests_per_second: f64) -> Self {
-        Self {
-            interval: Duration::from_secs_f64(1.0 / requests_per_second),
-            next: Mutex::new(Instant::now()),
-        }
-    }
-
-    async fn wait(&self) {
-        let slot = {
-            let mut next = self.next.lock().await;
-            let slot = (*next).max(Instant::now());
-            *next = slot + self.interval;
-            slot
-        };
-        tokio::time::sleep_until(slot).await;
-    }
-}
-
-#[derive(Debug)]
 struct Run<R> {
     fetcher: Arc<Fetcher<R>>,
     range: FetchRange,
     last_head_sample: Mutex<i64>,
-    pacer: Pacer,
     queue: Mutex<VecDeque<u64>>,
     report: Mutex<FetchReport>,
 }
@@ -193,16 +180,17 @@ pub async fn fetch_range<R: Resolver>(
     fetcher: Arc<Fetcher<R>>,
     range: FetchRange,
 ) -> Result<FetchReport, AcquireError> {
-    validate(&fetcher.limits, &range)?;
+    let limits = fetcher.requests.limits();
+    validate(&limits, &range)?;
     let missing = missing_fragments(&fetcher.ledger.database, &range)?;
     let total = range.last - range.first + 1;
     let already_stored = total - missing.len() as u64;
-    let concurrency = fetcher.limits.concurrency;
+    // As many workers as the budget allows in flight. The scheduler decides when each starts.
+    let concurrency = limits.concurrency;
     let last_head_sample = lock(&fetcher.ledger.database)?
         .latest_head_sample(range.stream_id)?
         .map_or(i64::MIN, |sample| sample.observed_at);
     let run = Arc::new(Run {
-        pacer: Pacer::new(fetcher.limits.requests_per_second),
         fetcher,
         range,
         last_head_sample: Mutex::new(last_head_sample),
@@ -227,18 +215,10 @@ fn validate(limits: &FetchLimits, range: &FetchRange) -> Result<(), AcquireError
     if range.first > range.last {
         return Err(AcquireError::InvalidRequest("the range is reversed"));
     }
-    if limits.concurrency == 0 {
-        return Err(AcquireError::InvalidRequest("concurrency must be positive"));
-    }
     if range.last - range.first >= MAX_RANGE_FRAGMENTS {
         return Err(AcquireError::InvalidRequest("the range exceeds the DVR"));
     }
-    if !REQUEST_RATES.contains(&limits.requests_per_second) {
-        return Err(AcquireError::InvalidRequest(
-            "the request rate is out of range",
-        ));
-    }
-    Ok(())
+    limits.validate()
 }
 
 fn missing_fragments(
@@ -288,8 +268,11 @@ impl<R: Resolver> Run<R> {
         let mut attempts = 0;
         loop {
             let lease = self.fetcher.session.lease().await?;
-            self.pacer.wait().await;
-            let response = self.fetcher.client.get(&lease.url, sq, lease.family).await;
+            let response = self
+                .fetcher
+                .requests
+                .get(&lease.url, sq, lease.family)
+                .await;
             let (outcome, response) = match response {
                 Ok(response) => (outcome_of(sq, &response), Some(response)),
                 Err(error) => {

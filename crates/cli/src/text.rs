@@ -149,8 +149,13 @@ pub(crate) fn doctor_text(report: &DoctorReport) -> String {
         )
     });
     let family = format!(
-        "ipv6 route: {}\nip policy: {:?}\nactive family: {}\nlast switch: {switch}\n",
-        report.has_ipv6_route, report.policy, report.active_family
+        "ipv6 route: {}\nip policy: {:?}\nactive family: {}\nlast switch: {switch}\n\
+         request limit: {} per second, {} at once\n",
+        report.has_ipv6_route,
+        report.policy,
+        report.active_family,
+        report.limits.requests_per_second,
+        report.limits.concurrency
     );
     tools.chain([family]).chain(resolution).collect()
 }

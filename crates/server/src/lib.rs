@@ -4,6 +4,7 @@ use api::{ApiState, router};
 use dalsegno_app::acquisition::{Acquisition, AcquisitionOptions, IpPolicy, Library};
 use dalsegno_app::backfill::DEFAULT_HOURS;
 use dalsegno_app::config::Config;
+use dalsegno_app::fetch::FetchLimits;
 use dalsegno_app::lifecycle::{
     ANALYSIS, BACKFILL, FEATURES, PREFETCH, PrefetchTarget, StreamTarget,
 };
@@ -87,13 +88,14 @@ async fn stopped(mut shutdown: watch::Receiver<bool>) {
     let _ = shutdown.wait_for(|is_stopping| *is_stopping).await;
 }
 
-/// Runs the service until it is told to stop.
-pub async fn serve(config: &Config, policy: IpPolicy) -> anyhow::Result<()> {
+/// Runs the service until it is told to stop. Every stream and job shares `limits`.
+pub async fn serve(config: &Config, policy: IpPolicy, limits: FetchLimits) -> anyhow::Result<()> {
     let library = Library::open(&config.data)?;
     let database = library.database();
     let acquisition = Acquisition::new(AcquisitionOptions {
         policy,
         cookies: config.cookies.clone(),
+        limits,
     })?;
     let listener = TcpListener::bind(config.bind).await?;
     let api = router(ApiState::new(library.clone()));

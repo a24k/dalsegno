@@ -112,16 +112,24 @@ good.
 
 ## Rate control
 
-A single scheduler owns all fragment requests.
+A single scheduler owns all fragment requests (FR-A8): following, range fetches, head reads
+and probes, of every stream and job in the process.
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| Requests per second | 4 | Token bucket. Measured ceiling is about 5 at concurrency 4. |
-| Concurrency | 4 | Global. |
+| Requests per second | 4 | Starts are spaced evenly. Measured ceiling is about 5 at concurrency 4. `--requests-per-second`, `DALSEGNO_REQUESTS_PER_SECOND`. |
+| Concurrency | 4 | Requests in flight. `--concurrency`, `DALSEGNO_CONCURRENCY`. |
 | Priority | follow > prefetch > backfill | Strict. Following one stream needs 0.2 requests per second. |
 
-The limiter is reduced to half for 10 minutes after any `Backoff` burst, because
-limits are per request rather than per byte.
+- **Priority:** a waiting request starts only when no more urgent one is waiting. Ranges a
+  person or an export is waiting for, and probes, are prefetch.
+- **Held requests:** a follow request just past the head is held by the origin until the
+  fragment exists, and keeps its slot meanwhile, which costs the origin nothing.
+- **Slowing down:** a 429, 503 or other 5xx halves the rate for 10 minutes from the latest one,
+  because limits are per request rather than per byte. The start of a slowdown is logged.
+  Transport errors do not count, as they say nothing about the origin's limits.
+- **Scope:** the budget is per process, so a CLI command run beside the service has its own.
+  `doctor` shows the limits of its process.
 
 ## Probing a new stream
 

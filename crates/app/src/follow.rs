@@ -96,7 +96,7 @@ pub async fn follow<R: Resolver>(
 /// Finds where to start. What was missed since the last run becomes a gap.
 async fn start_at_head<R: Resolver>(fetcher: &Fetcher<R>) -> Result<u64, AcquireError> {
     let lease = fetcher.session.lease().await?;
-    let head = read_head(&fetcher.client, &lease.url, lease.family).await?;
+    let head = read_head(&fetcher.requests, &lease.url, lease.family).await?;
     let ledger = &fetcher.ledger;
     let stored = lock(&ledger.database)?.follow_sq(ledger.stream_id)?;
     let next = match stored {
@@ -139,7 +139,7 @@ async fn jump_if_behind<R: Resolver>(
     next: u64,
 ) -> Result<u64, AcquireError> {
     let lease = fetcher.session.lease().await?;
-    let head = read_head(&fetcher.client, &lease.url, lease.family).await?;
+    let head = read_head(&fetcher.requests, &lease.url, lease.family).await?;
     if head.saturating_sub(next) <= policy.max_behind {
         return Ok(next);
     }
