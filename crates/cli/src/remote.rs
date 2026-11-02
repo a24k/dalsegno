@@ -26,16 +26,16 @@ fn stream_line(row: &Value) -> String {
     let reason = row["state_reason"]
         .as_str()
         .map_or(String::new(), |reason| format!(" ({reason})"));
-    let next = row["follow_sq"]
-        .as_u64()
-        .map_or("-".to_string(), |sq| sq.to_string());
+    let count = |key: &str| row[key].as_u64().map_or("-".to_string(), |n| n.to_string());
     format!(
-        "{} {} {}{reason}, {}, next sq {}: {}\n",
+        "{} {} {}{reason}, {}, next sq {}, {} to fill, {} lost: {}\n",
         row["id"],
         text(row, "video_id"),
         text(row, "state"),
         period,
-        next,
+        count("follow_sq"),
+        count("open_fragments"),
+        count("lost_fragments"),
         text(row, "title"),
     )
 }
@@ -166,12 +166,14 @@ mod tests {
             "state_reason": "offline",
             "period": 42244.71,
             "follow_sq": 7,
+            "open_fragments": 12,
+            "lost_fragments": 0,
             "title": "Example TV",
         });
 
         assert_eq!(
             stream_line(&row),
-            "1 abcDEF123_- error (offline), 42244.7 s, next sq 7: Example TV\n"
+            "1 abcDEF123_- error (offline), 42244.7 s, next sq 7, 12 to fill, 0 lost: Example TV\n"
         );
     }
 

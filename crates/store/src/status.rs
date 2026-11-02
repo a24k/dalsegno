@@ -23,6 +23,10 @@ pub struct StreamStatus {
     pub follow_sq: Option<u64>,
     /// When a fragment was last stored.
     pub last_fetch_at: Option<i64>,
+    /// Fragments in gaps still to be filled, of every format.
+    pub open_fragments: u64,
+    /// Fragments in gaps that left the DVR first, which stay holes.
+    pub lost_fragments: u64,
 }
 
 /// A change as the operator sees it.
@@ -61,8 +65,12 @@ pub struct RegionStatus {
     pub match_start: Option<f64>,
 }
 
-const STREAM_COLUMNS: &str =
-    "id, video_id, title, state, state_reason, period, follow_sq, last_fetch_at";
+const STREAM_COLUMNS: &str = "id, video_id, title, state, state_reason, period, follow_sq, \
+     last_fetch_at, \
+     (SELECT COALESCE(SUM(sq_last - sq_first + 1), 0) FROM gaps \
+      WHERE gaps.stream_id = streams.id AND gaps.status = 'open'), \
+     (SELECT COALESCE(SUM(sq_last - sq_first + 1), 0) FROM gaps \
+      WHERE gaps.stream_id = streams.id AND gaps.status = 'lost')";
 const CHANGE_COLUMNS: &str = "id, program_id, stream_id, state, detected_at, dvr_deadline_at, \
                               start_time, checks, boundaries";
 
@@ -78,6 +86,8 @@ fn read_stream(row: &Row<'_>) -> rusqlite::Result<RawStream> {
         period: row.get(5)?,
         follow_sq: row.get::<_, Option<i64>>(6)?.map(|sq| sq as u64),
         last_fetch_at: row.get(7)?,
+        open_fragments: row.get::<_, i64>(8)? as u64,
+        lost_fragments: row.get::<_, i64>(9)? as u64,
     };
     Ok((status, row.get(3)?))
 }
@@ -189,6 +199,7 @@ impl Listing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gaps::GapStatus;
     use crate::streams::tests::new_stream;
 
     fn database() -> (Database, i64) {
@@ -210,6 +221,32 @@ mod tests {
         assert_eq!(status.state, StreamState::Error);
         assert_eq!(status.state_reason.as_deref(), Some("offline"));
         assert_eq!(status.follow_sq, Some(42));
+    }
+
+    #[test]
+    fn a_stream_counts_its_unfilled_fragments_by_gap_status() {
+        let (database, id) = database();
+        database.add_gap(id, 140, 10, 19).unwrap();
+        database.add_gap(id, 248, 50, 51).unwrap();
+        let lost = database.add_gap(id, 140, 100, 104).unwrap();
+        database.set_gap_status(lost, GapStatus::Lost).unwrap();
+        let filled = database.add_gap(id, 140, 200, 299).unwrap();
+        database.set_gap_status(filled, GapStatus::Filled).unwrap();
+
+        let status = database.stream_status(id).unwrap().unwrap();
+        let listed = database.list_streams(10, 0).unwrap();
+
+        assert_eq!((status.open_fragments, status.lost_fragments), (12, 5));
+        assert_eq!(listed[0], status);
+    }
+
+    #[test]
+    fn a_stream_without_gaps_counts_none() {
+        let (database, id) = database();
+
+        let status = database.stream_status(id).unwrap().unwrap();
+
+        assert_eq!((status.open_fragments, status.lost_fragments), (0, 0));
     }
 
     #[test]

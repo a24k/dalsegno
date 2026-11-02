@@ -62,6 +62,11 @@ A running job that reports progress shows its share done and, from its pace so f
 long is left. So far only backfill reports, after each 500 fragments, and the API returns it as
 `progress` from 0 to 1.
 
+A stream shows its holes as fragments, of every format: `open_fragments` are in gaps still to be
+filled, and `lost_fragments` in gaps that left the DVR first, which stay holes. `status` shows them
+as `12 to fill, 0 lost`. A new or restarted stream has fragments to fill until backfill catches
+up, and a lost fragment is one the recording will never have.
+
 Offline commands read files and never need the service (FR-N11). Passing `--env` selects
 offline mode; otherwise `scan` and `diff` call the API:
 
