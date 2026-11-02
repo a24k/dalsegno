@@ -2,7 +2,9 @@
 
 use dalsegno_app::error::AcquireError;
 use dalsegno_app::family::{FamilyController, SharedFamily};
+use dalsegno_app::fetch::FetchLimits;
 use dalsegno_app::probe::{ProbeReport, ProbeTools, probe_stream, read_head};
+use dalsegno_app::schedule::{Priority, Requests, Scheduler};
 use dalsegno_app::session::Clock;
 use dalsegno_core::format::FormatInfo;
 use dalsegno_core::redact::Redacted;
@@ -125,13 +127,18 @@ fn missing_tools() -> ProbeTools {
     }
 }
 
-fn client() -> FragmentClient {
+fn client() -> Requests {
     let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
-    FragmentClient::new(BindAddresses {
+    let client = FragmentClient::new(BindAddresses {
         v4: loopback,
         v6: loopback,
     })
-    .unwrap()
+    .unwrap();
+    Requests::new(
+        client,
+        Scheduler::new(FetchLimits::default()),
+        Priority::Prefetch,
+    )
 }
 
 async fn origin() -> MockServer {

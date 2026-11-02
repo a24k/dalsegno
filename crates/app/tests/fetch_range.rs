@@ -403,6 +403,34 @@ async fn requests_are_paced() {
 }
 
 #[tokio::test]
+async fn ranges_fetched_together_share_one_budget() {
+    let harness = Harness::new(IpPolicy::V4Only).await;
+    serve_all(&harness.server).await;
+    let shared = Harness::requests(FetchLimits {
+        concurrency: 4,
+        requests_per_second: 100.0,
+    });
+    let range = |first, last| FetchRange {
+        stream_id: harness.stream_id,
+        itag: ITAG,
+        first,
+        last,
+    };
+    let follow = Arc::new(harness.fetcher_with(shared.at(Priority::Follow)));
+    let backfill = Arc::new(harness.fetcher_with(shared.at(Priority::Backfill)));
+
+    let started = Instant::now();
+    let (followed, filled) = tokio::join!(
+        fetch_range(follow, range(1, 5)),
+        fetch_range(backfill, range(6, 10)),
+    );
+
+    assert!(followed.unwrap().is_complete() && filled.unwrap().is_complete());
+    // Ten starts at 100 per second take 90 ms in one budget, and 40 ms in two.
+    assert!(started.elapsed() >= Duration::from_millis(90));
+}
+
+#[tokio::test]
 async fn invalid_requests_are_rejected_before_any_network_use() {
     let harness = Harness::new(IpPolicy::V4Only).await;
     let bad_limits = [

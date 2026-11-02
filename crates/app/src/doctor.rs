@@ -1,6 +1,7 @@
 //! Diagnostics: tools, routes, the active family and URL resolution per family (FR-C2).
 
 use crate::family::{FamilyController, FamilySwitch};
+use crate::fetch::FetchLimits;
 use dalsegno_core::stream::{IpFamily, IpPolicy, VideoId};
 use dalsegno_io::tools::{find_program, version};
 use dalsegno_io::ytdlp::Resolver;
@@ -35,12 +36,14 @@ pub struct ResolutionCheck {
 }
 
 /// The `doctor` report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DoctorReport {
     /// External tools.
     pub tools: Vec<ToolStatus>,
     /// Whether the host has a route to global IPv6 addresses.
     pub has_ipv6_route: bool,
+    /// The request budget of this process. The service logs when it slows down.
+    pub limits: FetchLimits,
     /// Configured policy.
     pub policy: IpPolicy,
     /// Family in use.
@@ -56,6 +59,7 @@ pub async fn run_doctor<R: Resolver>(
     resolver: &R,
     family: &FamilyController,
     has_ipv6_route: bool,
+    limits: FetchLimits,
     stream: Option<&VideoId>,
 ) -> DoctorReport {
     let mut tools = Vec::new();
@@ -71,6 +75,7 @@ pub async fn run_doctor<R: Resolver>(
     DoctorReport {
         tools,
         has_ipv6_route,
+        limits,
         policy: family.policy(),
         active_family: family.active(),
         last_switch: family.last_switch(),
@@ -147,10 +152,16 @@ mod tests {
     async fn reports_every_tool_and_the_family_state() {
         let family = FamilyController::new(IpPolicy::V4Only, false);
 
-        let report = run_doctor(&V4OnlyResolver, &family, false, None).await;
+        let limits = FetchLimits {
+            concurrency: 2,
+            requests_per_second: 3.0,
+        };
+
+        let report = run_doctor(&V4OnlyResolver, &family, false, limits, None).await;
 
         let names: Vec<&str> = report.tools.iter().map(|tool| tool.name.as_str()).collect();
         assert_eq!(names, ["yt-dlp", "ffmpeg", "ffprobe"]);
+        assert_eq!(report.limits, limits);
         assert_eq!(report.policy, IpPolicy::V4Only);
         assert_eq!(report.active_family, IpFamily::V4);
         assert!(report.resolution.is_empty());
@@ -161,7 +172,9 @@ mod tests {
         let family = FamilyController::new(IpPolicy::V6First, true);
         let video = VideoId::parse("abcDEF123_-").unwrap();
 
-        let report = run_doctor(&V4OnlyResolver, &family, true, Some(&video)).await;
+        let limits = FetchLimits::default();
+
+        let report = run_doctor(&V4OnlyResolver, &family, true, limits, Some(&video)).await;
 
         assert_eq!(
             report.resolution,

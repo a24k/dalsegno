@@ -18,6 +18,7 @@ use crate::acquisition::{Acquisition, Library};
 use crate::error::AcquireError;
 use crate::fetch::{FetchRange, MAX_RANGE_FRAGMENTS, fetch_range, lock};
 use crate::lifecycle::PrefetchTarget;
+use crate::schedule::Priority;
 use dalsegno_core::export::check_output_dir;
 use dalsegno_io::ffmpeg::Ffmpeg;
 use dalsegno_io::tools::find_program;
@@ -96,7 +97,7 @@ impl Acquisition {
         if is_complete {
             return Ok(());
         }
-        let fetcher = Arc::new(self.fetcher(library, row, itag)?);
+        let fetcher = Arc::new(self.fetcher(library, row, itag, Priority::Prefetch)?);
         let mut start = first;
         while start <= last {
             let end = last.min(start + MAX_RANGE_FRAGMENTS - 1);

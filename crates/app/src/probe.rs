@@ -7,10 +7,10 @@ use dalsegno_core::acquisition::{Outcome, ResponseFacts, classify};
 use dalsegno_core::container::{parse_mp4_fragment, read_timing};
 pub use dalsegno_core::format::FormatInfo;
 
+use crate::schedule::Requests;
 use dalsegno_core::format::{choose_audio, video_candidates};
 use dalsegno_core::redact::Redacted;
 use dalsegno_core::stream::{IpFamily, VideoId, propose_short_name};
-use dalsegno_io::http::FragmentClient;
 use dalsegno_io::tools::{remux_video_to_mp4, video_keyframes};
 use dalsegno_io::ytdlp::{ResolveError, Resolver, StreamFormat, StreamInfo};
 use serde::Serialize;
@@ -121,14 +121,14 @@ impl ProbeReport {
 /// next one, as following does (D-26).
 pub async fn probe_stream<R: Resolver>(
     resolver: &R,
-    client: &FragmentClient,
+    requests: &Requests,
     tools: &ProbeTools,
     video: &VideoId,
     family: &SharedFamily,
     clock: &Clock,
 ) -> Result<ProbeReport, AcquireError> {
     loop {
-        let report = probe_once(resolver, client, tools, video, family, clock).await?;
+        let report = probe_once(resolver, requests, tools, video, family, clock).await?;
         if !report.is_refused() {
             return Ok(report);
         }
@@ -146,7 +146,7 @@ pub async fn probe_stream<R: Resolver>(
 
 async fn probe_once<R: Resolver>(
     resolver: &R,
-    client: &FragmentClient,
+    requests: &Requests,
     tools: &ProbeTools,
     video: &VideoId,
     family: &SharedFamily,
@@ -160,12 +160,12 @@ async fn probe_once<R: Resolver>(
         .ok_or(AcquireError::InvalidRequest(
             "the stream offers no live formats",
         ))?;
-    let head_sq = read_head(client, head_url, used).await?;
+    let head_sq = read_head(requests, head_url, used).await?;
     let mut rejected = Vec::new();
     let mut fragment_seconds = None;
     let mut audio = None;
     if let Some(format) = audio_choice {
-        match probe_audio(client, format, used, head_sq).await {
+        match probe_audio(requests, format, used, head_sq).await {
             Ok(seconds) => {
                 fragment_seconds = Some(seconds);
                 audio = Some(format.info.clone());
@@ -175,7 +175,7 @@ async fn probe_once<R: Resolver>(
     }
     let mut chosen_video = None;
     for format in ordered_video(&info).into_iter().take(MAX_VIDEO_CANDIDATES) {
-        match probe_video(client, tools, format, used, head_sq).await {
+        match probe_video(requests, tools, format, used, head_sq).await {
             Ok(()) => {
                 chosen_video = Some(format.info.clone());
                 break;
@@ -263,11 +263,11 @@ fn format_infos(info: &StreamInfo) -> Vec<FormatInfo> {
 
 /// Returns the head reported by the origin.
 pub async fn read_head(
-    client: &FragmentClient,
+    requests: &Requests,
     url: &Redacted<String>,
     family: IpFamily,
 ) -> Result<u64, AcquireError> {
-    client
+    requests
         .get(url, HEAD_QUERY_SQ, family)
         .await?
         .head_seqnum
@@ -275,7 +275,7 @@ pub async fn read_head(
 }
 
 async fn fetch_pair(
-    client: &FragmentClient,
+    requests: &Requests,
     format: &StreamFormat,
     family: IpFamily,
     head_sq: u64,
@@ -284,7 +284,7 @@ async fn fetch_pair(
         .checked_sub(PROBE_DISTANCE_FROM_HEAD)
         .ok_or("the stream is too short to probe")?;
     let fetch = async |sq| {
-        let response = client
+        let response = requests
             .get(&format.url, sq, family)
             .await
             .map_err(|error| Failure::from(error.to_string()))?;
@@ -311,23 +311,23 @@ async fn fetch_pair(
 }
 
 async fn probe_audio(
-    client: &FragmentClient,
+    requests: &Requests,
     format: &StreamFormat,
     family: IpFamily,
     head_sq: u64,
 ) -> Result<f64, Failure> {
-    let (first, second) = fetch_pair(client, format, family, head_sq).await?;
+    let (first, second) = fetch_pair(requests, format, family, head_sq).await?;
     Ok(check_audio_pair(&first, &second)?)
 }
 
 async fn probe_video(
-    client: &FragmentClient,
+    requests: &Requests,
     tools: &ProbeTools,
     format: &StreamFormat,
     family: IpFamily,
     head_sq: u64,
 ) -> Result<(), Failure> {
-    let (first, second) = fetch_pair(client, format, family, head_sq).await?;
+    let (first, second) = fetch_pair(requests, format, family, head_sq).await?;
     Ok(check_video_pair(tools, &first, &second).await?)
 }
 

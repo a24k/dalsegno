@@ -10,6 +10,7 @@ use dalsegno_app::export::{
     AirTime, CutRequest, DEFAULT_SUFFIX, DEFAULT_TEMPLATE, ExportKind, NewProgram, Ownership,
     PlexTarget, PublishRequest, Redacted, TagEdits, find_tools,
 };
+use dalsegno_app::fetch::FetchLimits;
 use dalsegno_app::offline::{self, DiffRequest};
 use dalsegno_app::remote::ApiClient;
 use serde::Serialize;
@@ -38,6 +39,22 @@ struct Cli {
         default_value = "v6-first"
     )]
     ip_policy: dalsegno_app::acquisition::IpPolicy,
+    /// Fragment requests started per second, shared by every stream and job.
+    #[arg(
+        long,
+        global = true,
+        env = "DALSEGNO_REQUESTS_PER_SECOND",
+        default_value_t = FetchLimits::default().requests_per_second
+    )]
+    requests_per_second: f64,
+    /// Fragment requests in flight at once, shared by every stream and job.
+    #[arg(
+        long,
+        global = true,
+        env = "DALSEGNO_CONCURRENCY",
+        default_value_t = FetchLimits::default().concurrency
+    )]
+    concurrency: usize,
     /// Cookie file for yt-dlp.
     #[arg(long, global = true, env = "DALSEGNO_COOKIES")]
     cookies: Option<PathBuf>,
@@ -352,8 +369,12 @@ async fn main() -> anyhow::Result<()> {
     let Some(command) = cli.command else {
         return Ok(());
     };
+    let limits = FetchLimits {
+        concurrency: cli.concurrency,
+        requests_per_second: cli.requests_per_second,
+    };
     if matches!(command, Command::Serve) {
-        return dalsegno_server::serve(&Config::load()?, cli.ip_policy).await;
+        return dalsegno_server::serve(&Config::load()?, cli.ip_policy, limits).await;
     }
     let json = cli.json;
     let command = match run_offline(command, json).await? {
@@ -367,6 +388,7 @@ async fn main() -> anyhow::Result<()> {
     let acquisition = Acquisition::new(AcquisitionOptions {
         policy: cli.ip_policy,
         cookies: cli.cookies,
+        limits,
     })?;
     let data_dir = cli.data_dir;
     let library = || match &data_dir {
@@ -657,6 +679,26 @@ mod tests {
         };
         assert_eq!((itag, last), (140, 2));
         assert_eq!(output, Some(PathBuf::from("/tmp/out")));
+    }
+
+    #[test]
+    fn request_limits_come_from_the_arguments_or_the_defaults() {
+        let given = Cli::try_parse_from([
+            "dalsegno",
+            "--requests-per-second",
+            "2.5",
+            "--concurrency",
+            "1",
+            "doctor",
+        ])
+        .unwrap();
+        let defaults = Cli::try_parse_from(["dalsegno", "doctor"]).unwrap();
+
+        assert_eq!((given.requests_per_second, given.concurrency), (2.5, 1));
+        assert_eq!(
+            (defaults.requests_per_second, defaults.concurrency),
+            (4.0, 4)
+        );
     }
 
     #[test]
