@@ -13,6 +13,27 @@ use std::sync::Arc;
 pub const DEFAULT_HOURS: f64 = 24.0;
 const MAX_HOURS: f64 = 120.0;
 const SECONDS_PER_HOUR: f64 = 3600.0;
+/// Fragments fetched between progress reports, about 40 minutes of 5-second fragments.
+const STEP_FRAGMENTS: u64 = 500;
+
+/// How far a backfill has come, in fragments of the open gaps it found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    /// Fragments dealt with, fetched or not.
+    pub done: u64,
+    /// Fragments missing when it started.
+    pub total: u64,
+}
+
+impl Progress {
+    /// The share done, where nothing to do counts as done.
+    pub fn fraction(self) -> f64 {
+        if self.total == 0 {
+            return 1.0;
+        }
+        self.done as f64 / self.total as f64
+    }
+}
 
 /// What a backfill achieved.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -27,11 +48,13 @@ pub struct BackfillReport {
     pub failed: u64,
 }
 
-/// Records what is missing from the last `hours` of the stream, then fills open gaps.
+/// Records what is missing from the last `hours` of the stream, then fills open gaps, telling
+/// `progress` at the start and after each step.
 pub async fn backfill<R: Resolver>(
     fetcher: Arc<Fetcher<R>>,
     fragment_len: f64,
     hours: f64,
+    progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<BackfillReport, AcquireError> {
     if !(hours > 0.0 && hours <= MAX_HOURS) {
         return Err(AcquireError::InvalidRequest("hours must be from 0 to 120"));
@@ -49,8 +72,13 @@ pub async fn backfill<R: Resolver>(
         head_sq,
         ..BackfillReport::default()
     };
+    let mut done = Progress {
+        done: 0,
+        total: gaps.iter().map(|gap| gap.sq_last - gap.sq_first + 1).sum(),
+    };
+    progress(done);
     for gap in gaps {
-        fill(&fetcher, gap, &mut report).await?;
+        fill(&fetcher, gap, &mut report, &mut done, progress).await?;
     }
     Ok(report)
 }
@@ -82,11 +110,11 @@ async fn fill<R: Resolver>(
     fetcher: &Arc<Fetcher<R>>,
     gap: Gap,
     report: &mut BackfillReport,
+    done: &mut Progress,
+    progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<(), AcquireError> {
     let mut total = FetchReport::default();
-    let mut first = gap.sq_first;
-    while first <= gap.sq_last {
-        let last = gap.sq_last.min(first + MAX_RANGE_FRAGMENTS - 1);
+    for (first, last) in steps(gap.sq_first, gap.sq_last, STEP_FRAGMENTS) {
         let range = FetchRange {
             stream_id: gap.stream_id,
             itag: gap.itag,
@@ -97,7 +125,8 @@ async fn fill<R: Resolver>(
         total.fetched += part.fetched;
         total.lost.extend(part.lost);
         total.failed.extend(part.failed);
-        first = last + 1;
+        done.done += last - first + 1;
+        progress(*done);
     }
     report.fetched += total.fetched;
     report.lost += total.lost.len() as u64;
@@ -114,6 +143,14 @@ async fn fill<R: Resolver>(
         _ => database.set_gap_status(gap.id, GapStatus::Filled)?,
     }
     Ok(())
+}
+
+/// Splits an inclusive range into runs of at most `size`.
+fn steps(first: u64, last: u64, size: u64) -> Vec<(u64, u64)> {
+    (first..=last)
+        .step_by(size as usize)
+        .map(|start| (start, last.min(start + size - 1)))
+        .collect()
 }
 
 /// Groups ascending numbers into inclusive runs.
@@ -139,5 +176,17 @@ mod tests {
             [(1, 3), (7, 7), (9, 10)]
         );
         assert_eq!(ranges(std::iter::empty()), []);
+    }
+
+    #[test]
+    fn a_gap_is_fetched_in_steps() {
+        assert_eq!(steps(1, 1200, 500), [(1, 500), (501, 1000), (1001, 1200)]);
+        assert_eq!(steps(7, 7, 500), [(7, 7)]);
+    }
+
+    #[test]
+    fn nothing_to_do_is_done() {
+        assert_eq!(Progress { done: 0, total: 0 }.fraction(), 1.0);
+        assert_eq!(Progress { done: 1, total: 4 }.fraction(), 0.25);
     }
 }

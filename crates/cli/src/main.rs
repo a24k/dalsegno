@@ -387,7 +387,9 @@ async fn main() -> anyhow::Result<()> {
             print_report(cli.json, &report, add_text)
         }
         Command::Backfill { stream, hours } => {
-            let report = acquisition.backfill(&library()?, &stream, hours).await?;
+            let report = acquisition
+                .backfill(&library()?, &stream, hours, &|_| {})
+                .await?;
             print_report(cli.json, &report, backfill_text)
         }
         Command::Features { stream } => {

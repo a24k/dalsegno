@@ -1,5 +1,6 @@
 //! Running queued jobs, one per class at a time.
 
+use dalsegno_app::backfill::Progress;
 use dalsegno_app::fetch::{SharedDatabase, lock};
 use dalsegno_store::jobs::{JobClass, JobRow};
 use std::fmt::Debug;
@@ -24,6 +25,20 @@ pub trait JobHandler: Debug + Send + Sync + 'static {
 }
 
 /// Returns the time in epoch milliseconds.
+/// Stores how far a job has come. A failure only costs the display, so it is logged.
+pub(crate) fn record_progress(database: &SharedDatabase, id: i64, progress: Progress) {
+    let stored = lock(database)
+        .map_err(|error| error.to_string())
+        .and_then(|database| {
+            database
+                .set_job_progress(id, progress.fraction(), None)
+                .map_err(|error| error.to_string())
+        });
+    if let Err(error) = stored {
+        tracing::warn!(job = id, %error, "job progress was not stored");
+    }
+}
+
 pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -188,6 +203,20 @@ mod tests {
             sleep(Duration::from_millis(5)).await;
         }
         panic!("job {id} never reached {wanted:?}");
+    }
+
+    #[test]
+    fn progress_is_recorded_on_the_job() {
+        let database = shared();
+        let id = enqueue(&database, "backfill", JobClass::NetLow);
+        lock(&database)
+            .unwrap()
+            .claim_job(JobClass::NetLow, 0)
+            .unwrap();
+
+        record_progress(&database, id, Progress { done: 3, total: 4 });
+
+        assert_eq!(state(&database, id).progress, 0.75);
     }
 
     #[tokio::test]
