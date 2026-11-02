@@ -73,7 +73,13 @@ impl Library {
 
     /// Opens or creates the library.
     pub fn open(data_dir: &Path) -> Result<Self, AcquireError> {
-        fs::create_dir_all(data_dir)?;
+        // SQLite would only say it cannot open its file, so the directory is tried first.
+        fs::create_dir_all(data_dir)
+            .and_then(|()| tempfile::tempfile_in(data_dir))
+            .map_err(|source| AcquireError::DataDirectory {
+                path: data_dir.to_path_buf(),
+                source,
+            })?;
         let database = Database::open(&data_dir.join(DATABASE_FILE))?;
         Ok(Self {
             database: Arc::new(Mutex::new(database)),
@@ -376,6 +382,56 @@ mod tests {
         let report = Library::open(data.path()).unwrap().sweep().await.unwrap();
 
         assert_eq!(report, SweepReport::default());
+    }
+
+    /// Runs `check` with `directory` read-only, then makes it writable again for cleanup.
+    #[cfg(unix)]
+    fn read_only(directory: &Path, check: impl FnOnce()) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o555)).unwrap();
+        check();
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_data_directory_that_cannot_be_written_is_named() {
+        let data = tempfile::tempdir().unwrap();
+
+        read_only(data.path(), || {
+            let error = Library::open(data.path()).unwrap_err();
+
+            assert!(
+                matches!(error, AcquireError::DataDirectory { .. }),
+                "{error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains(&data.path().display().to_string()),
+                "{message}"
+            );
+            assert!(message.contains("not writable"), "{message}");
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_data_directory_that_cannot_be_created_is_named() {
+        let parent = tempfile::tempdir().unwrap();
+        let data = parent.path().join("data");
+
+        read_only(parent.path(), || {
+            let error = Library::open(&data).unwrap_err();
+
+            assert!(
+                matches!(error, AcquireError::DataDirectory { .. }),
+                "{error}"
+            );
+            assert!(
+                error.to_string().contains(&data.display().to_string()),
+                "{error}"
+            );
+        });
     }
 
     #[tokio::test]

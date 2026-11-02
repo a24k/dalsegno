@@ -163,7 +163,10 @@ The work area is on local disk, and finished output is transferred to the NAS li
   `ghcr.io/a24k/dalsegno` as `1.2.3`, `1.2` and `latest`. The tag must match `Cargo.toml`. A tag
   `v1.2.3-rc.1` publishes only `1.2.3-rc.1`. A merge publishes nothing (D-32).
 - **Volumes:** `/data` local disk, `/config` settings and cookie, `/library` NAS.
-- **User:** runs as the library owner's uid:gid.
+- **User:** root by default, so `/data` can be created and an export can set its owner
+  with `--owner`. On an NFS library with root squashing, run as the library owner's uid:gid,
+  and give `/data` that owner first. If `/data` cannot be written, the service stops with an
+  error that names it.
 - **IPv6:** needs `enable_ipv6` with an address range, or host networking; otherwise IPv4
   is used.
 - **Optional:** `/dev/dri` for VAAPI decoding during black detection. When Docker runs in a
