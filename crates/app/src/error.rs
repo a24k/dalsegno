@@ -8,6 +8,7 @@ use dalsegno_io::tools::ToolError;
 use dalsegno_io::transfer::TransferError;
 use dalsegno_store::database::StoreError;
 use std::io;
+use std::path::PathBuf;
 
 /// Why an acquisition use case stopped.
 #[derive(Debug, thiserror::Error)]
@@ -27,6 +28,12 @@ pub enum AcquireError {
     /// The origin did not report its head.
     #[error("the origin did not report a head sequence number")]
     NoHead,
+    /// The data directory cannot be created or written, usually because of its owner.
+    #[error(
+        "the data directory {} is not writable: {source}; check the owner of the volume, or the user the service runs as",
+        path.display()
+    )]
+    DataDirectory { path: PathBuf, source: io::Error },
     /// The disk refused a write.
     #[error("fragment storage failed: {0}")]
     Store(#[from] io::Error),
