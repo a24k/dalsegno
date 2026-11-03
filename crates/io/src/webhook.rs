@@ -1,20 +1,57 @@
 //! Sending notifications to a webhook (FR-J3).
 
 use dalsegno_core::redact::Redacted;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// Who the messages come from, which the Mattermost message says first.
+const SENDER: &str = "dalsegno";
+
+/// How serious a notification is, which Mattermost shows as the attachment's colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// Something came back or went well.
+    Good,
+    /// Something to look at.
+    Notice,
+    /// Something was lost or stopped.
+    Bad,
+}
+
+impl Tone {
+    fn colour(self) -> &'static str {
+        match self {
+            Self::Good => "#3DB887",
+            Self::Notice => "#FFBC1F",
+            Self::Bad => "#D24B4E",
+        }
+    }
+}
 
 /// A notification, worded but not yet marked up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
-    /// What happened and to what, read first.
-    pub title: String,
+    /// What happened, such as "Change seen".
+    pub event: String,
+    /// The stream it happened to, if any.
+    pub subject: Option<String>,
     /// The details.
     pub text: String,
     /// Where to act on it.
     pub link: Option<Link>,
+    /// How serious it is.
+    pub tone: Tone,
+}
+
+impl Message {
+    /// What happened and to what, in one line, such as "Change seen: Example TV".
+    pub fn title(&self) -> String {
+        match &self.subject {
+            Some(subject) => format!("{}: {subject}", self.event),
+            None => self.event.clone(),
+        }
+    }
 }
 
 /// A link that reads as words.
@@ -49,17 +86,18 @@ impl WebhookFormat {
     }
 
     /// Marks a message up for this format: the title in bold, then the text, then the link.
+    /// Mattermost is sent as an attachment instead, and this is its form as one message.
     pub fn markup(self, message: &Message) -> String {
         let (title, text) = match self {
             Self::Slack => (
-                format!("*{}*", escape_mrkdwn(&message.title)),
+                format!("*{}*", escape_mrkdwn(&message.title())),
                 escape_mrkdwn(&message.text),
             ),
             Self::Mattermost => (
-                format!("**{}**", escape_markdown(&message.title)),
+                format!("**{}**", escape_markdown(&message.title())),
                 escape_markdown(&message.text),
             ),
-            Self::Ntfy => (message.title.clone(), message.text.clone()),
+            Self::Ntfy => (message.title(), message.text.clone()),
         };
         let link = message.link.as_ref().map(|link| match self {
             Self::Slack => format!(
@@ -84,6 +122,37 @@ impl WebhookFormat {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+/// The Mattermost payload: who it is from and about in the message, and what happened in an
+/// attachment coloured by its tone, with the whole line as the fallback for push notifications.
+fn attachment_payload(message: &Message) -> Value {
+    let header = match &message.subject {
+        // Code spans have no escape and end at a line break, so those are swapped out.
+        Some(subject) => format!(
+            "**{SENDER}** `{}`",
+            subject.replace('`', "'").replace(['\n', '\r'], " ")
+        ),
+        None => format!("**{SENDER}**"),
+    };
+    let attachment = json!({
+        "fallback": message.title(),
+        "color": message.tone.colour(),
+        "title": message.event,
+        "text": escape_markdown(&message.text),
+        "footer": format!("{SENDER} {}", env!("CARGO_PKG_VERSION")),
+    });
+    // A link is added only when there is one, as some receivers refuse a null.
+    let attachment = match (&message.link, attachment) {
+        (Some(link), Value::Object(fields)) => Value::Object(
+            fields
+                .into_iter()
+                .chain([("title_link".to_string(), json!(link.url))])
+                .collect(),
+        ),
+        (_, attachment) => attachment,
+    };
+    json!({ "text": header, "attachments": [attachment] })
 }
 
 /// Slack reads `&`, `<` and `>` as control characters, and has no other escape, so a `*` in a
@@ -144,13 +213,15 @@ impl Webhook {
 
     /// Sends a message.
     pub async fn send(&self, message: &Message) -> Result<(), WebhookError> {
-        let text = self.format.markup(message);
         let request = self.client.post(self.url.expose());
         let request = match self.format {
-            WebhookFormat::Slack | WebhookFormat::Mattermost => request
+            WebhookFormat::Slack => request
                 .header("Content-Type", "application/json")
-                .body(json!({ "text": text }).to_string()),
-            WebhookFormat::Ntfy => request.body(text),
+                .body(json!({ "text": self.format.markup(message) }).to_string()),
+            WebhookFormat::Mattermost => request
+                .header("Content-Type", "application/json")
+                .body(attachment_payload(message).to_string()),
+            WebhookFormat::Ntfy => request.body(self.format.markup(message)),
         };
         let response = request
             .send()
@@ -177,12 +248,14 @@ mod tests {
 
     fn message(title: &str, text: &str) -> Message {
         Message {
-            title: title.to_string(),
+            event: title.to_string(),
+            subject: None,
             text: text.to_string(),
             link: Some(Link {
                 label: "Open the change".to_string(),
                 url: "https://dalsegno.example/changes/7".to_string(),
             }),
+            tone: Tone::Notice,
         }
     }
 
@@ -210,10 +283,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mattermost_gets_json() {
+    async fn mattermost_gets_an_attachment() {
         let server = MockServer::start().await;
+        let version = env!("CARGO_PKG_VERSION");
         Mock::given(method("POST"))
-            .and(body_json(json!({ "text": "**Hello**\nworld" })))
+            .and(body_json(json!({
+                "text": "**dalsegno**",
+                "attachments": [{
+                    "fallback": "Hello",
+                    "color": "#FFBC1F",
+                    "title": "Hello",
+                    "text": "world",
+                    "footer": format!("dalsegno {version}"),
+                }],
+            })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
@@ -223,6 +306,36 @@ mod tests {
             .send(&hello())
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn mattermost_names_the_stream_and_links_the_title() {
+        let change = Message {
+            event: "Change seen".to_string(),
+            subject: Some("Example `TV`\n".to_string()),
+            tone: Tone::Bad,
+            ..message("x", "a *b*")
+        };
+
+        let payload = attachment_payload(&change);
+
+        assert_eq!(payload["text"], "**dalsegno** `Example 'TV' `");
+        let attachment = &payload["attachments"][0];
+        assert_eq!(attachment["fallback"], "Change seen: Example `TV`\n");
+        assert_eq!(attachment["color"], "#D24B4E");
+        assert_eq!(attachment["title"], "Change seen");
+        assert_eq!(
+            attachment["title_link"],
+            "https://dalsegno.example/changes/7"
+        );
+        assert_eq!(attachment["text"], "a \\*b\\*");
+    }
+
+    #[test]
+    fn each_tone_has_its_colour() {
+        let colours = [Tone::Good, Tone::Notice, Tone::Bad].map(Tone::colour);
+
+        assert_eq!(colours, ["#3DB887", "#FFBC1F", "#D24B4E"]);
     }
 
     #[tokio::test]

@@ -2,7 +2,7 @@
 
 use chrono::DateTime;
 use chrono_tz::Asia::Tokyo;
-use dalsegno_io::webhook::{Link, Message};
+use dalsegno_io::webhook::{Link, Message, Tone};
 use dalsegno_store::notifications::Notification;
 use serde_json::Value;
 
@@ -90,10 +90,9 @@ fn link(notification: &Notification, public_url: Option<&str>) -> Option<Link> {
 }
 
 fn describe_change(notification: &Notification, body: &Value, now: i64) -> (String, String) {
-    let stream = text(body, "stream");
     if notification.subject.ends_with(":confirmed") {
         return (
-            format!("Change confirmed: {stream}"),
+            "Change confirmed".to_string(),
             format!(
                 "The period went from {:.1} s to {:.1} s, with {} compared.",
                 number(body, "old_period"),
@@ -103,7 +102,7 @@ fn describe_change(notification: &Notification, body: &Value, now: i64) -> (Stri
         );
     }
     (
-        format!("Change seen: {stream}"),
+        "Change seen".to_string(),
         format!(
             "{:+.1} s so far. Export the old version{} before it leaves the DVR.",
             number(body, "delta"),
@@ -112,13 +111,13 @@ fn describe_change(notification: &Notification, body: &Value, now: i64) -> (Stri
     )
 }
 
-/// What a stream notification is about, from the event its subject names.
-fn stream_event(subject: &str) -> &'static str {
+/// What a stream notification is about and how serious, from the event its subject names.
+fn stream_event(subject: &str) -> (&'static str, Tone) {
     match subject.split(':').nth(2) {
-        Some("ended") => "Stream ended",
-        Some("error") => "Stream error",
-        Some("recovered") => "Stream recovered",
-        _ => "Stream",
+        Some("ended") => ("Stream ended", Tone::Notice),
+        Some("error") => ("Stream error", Tone::Bad),
+        Some("recovered") => ("Stream recovered", Tone::Good),
+        _ => ("Stream", Tone::Notice),
     }
 }
 
@@ -191,41 +190,84 @@ fn describe_summary(body: &Value) -> (String, String) {
     ("Daily summary".to_string(), details)
 }
 
-/// Words a notification: what happened and to what, the details, and a link when a public
-/// URL is set.
+/// Words a notification: what happened and to which stream, the details, how serious it is,
+/// and a link when a public URL is set.
 pub fn render(notification: &Notification, public_url: Option<&str>, now: i64) -> Message {
     let body: Value = serde_json::from_str(&notification.body).unwrap_or(Value::Null);
-    let stream = text(&body, "stream");
-    let (title, details) = match notification.kind.as_str() {
-        CHANGE => describe_change(notification, &body, now),
+    let stream = Some(text(&body, "stream").to_string());
+    let ((event, details), subject, tone) = match notification.kind.as_str() {
+        CHANGE => (
+            describe_change(notification, &body, now),
+            stream,
+            Tone::Notice,
+        ),
         DEADLINE => (
-            format!("DVR deadline: {stream}"),
-            format!(
-                "Export the old version{} before it leaves the DVR.",
-                by_deadline(&body, now),
+            (
+                "DVR deadline".to_string(),
+                format!(
+                    "Export the old version{} before it leaves the DVR.",
+                    by_deadline(&body, now),
+                ),
             ),
+            stream,
+            Tone::Notice,
         ),
-        STREAM => (
-            format!("{}: {stream}", stream_event(&notification.subject)),
-            capitalised(text(&body, "message")),
-        ),
+        STREAM => {
+            let (event, tone) = stream_event(&notification.subject);
+            let words = (event.to_string(), capitalised(text(&body, "message")));
+            (words, stream, tone)
+        }
         GAP => (
-            format!("Lost gap: {stream}"),
-            format!(
-                "{:.0} s of track {} left the DVR before it was fetched, so the recording has a \
-                 hole that cannot be filled.",
-                number(&body, "seconds"),
-                number(&body, "itag"),
+            (
+                "Lost gap".to_string(),
+                format!(
+                    "{:.0} s of track {} left the DVR before it was fetched, so the recording \
+                     has a hole that cannot be filled.",
+                    number(&body, "seconds"),
+                    number(&body, "itag"),
+                ),
             ),
+            stream,
+            Tone::Bad,
         ),
-        SERVICE => describe_start(&body),
-        SUMMARY => describe_summary(&body),
-        other => (other.to_string(), notification.subject.clone()),
+        SERVICE => (describe_start(&body), None, start_tone(&body)),
+        SUMMARY => (describe_summary(&body), None, summary_tone(&body)),
+        other => (
+            (other.to_string(), notification.subject.clone()),
+            None,
+            Tone::Notice,
+        ),
     };
     Message {
-        title,
+        event,
+        subject,
         text: details,
         link: link(notification, public_url),
+        tone,
+    }
+}
+
+fn has_items(body: &Value, key: &str) -> bool {
+    body[key].as_array().is_some_and(|items| !items.is_empty())
+}
+
+/// A start is good unless it left a setting off.
+fn start_tone(body: &Value) -> Tone {
+    if has_items(body, "ignored") {
+        Tone::Notice
+    } else {
+        Tone::Good
+    }
+}
+
+/// A summary is good unless a job failed or a fragment was lost.
+fn summary_tone(body: &Value) -> Tone {
+    let streams = body["streams"].as_array().map_or(&[][..], Vec::as_slice);
+    let has_lost = streams.iter().any(|stream| number(stream, "lost") > 0.0);
+    if has_items(body, "failed") || has_lost {
+        Tone::Notice
+    } else {
+        Tone::Good
     }
 }
 
@@ -267,7 +309,7 @@ mod tests {
     fn a_provisional_change_gives_the_deadline_and_the_time_left() {
         let message = render(&provisional(DEADLINE_MS), None, NOW);
 
-        assert_eq!(message.title, "Change seen: Example TV");
+        assert_eq!(message.title(), "Change seen: Example TV");
         assert_eq!(
             message.text,
             "+455.0 s so far. Export the old version by 11/04 22:00 JST (48 hours left) before \
@@ -301,7 +343,7 @@ mod tests {
 
         let message = render(&notification(CHANGE, "change:7:confirmed", body), None, NOW);
 
-        assert_eq!(message.title, "Change confirmed: Example TV");
+        assert_eq!(message.title(), "Change confirmed: Example TV");
         assert_eq!(
             message.text,
             "The period went from 100.0 s to 150.5 s, with 1 region compared."
@@ -335,7 +377,7 @@ mod tests {
             NOW,
         );
 
-        assert_eq!(message.title, "DVR deadline: Example TV");
+        assert_eq!(message.title(), "DVR deadline: Example TV");
         assert_eq!(
             message.text,
             "Export the old version by 11/04 22:00 JST (48 hours left) before it leaves the DVR."
@@ -369,7 +411,7 @@ mod tests {
             NOW,
         );
 
-        assert_eq!(message.title, "Stream error: Example TV");
+        assert_eq!(message.title(), "Stream error: Example TV");
         assert_eq!(message.text, "Following failed: offline");
         assert_eq!(
             message.link.unwrap().url,
@@ -388,8 +430,8 @@ mod tests {
         );
         let ended = render(&notification(STREAM, "stream:1:ended", body), None, NOW);
 
-        assert_eq!(recovered.title, "Stream recovered: Example TV");
-        assert_eq!(ended.title, "Stream ended: Example TV");
+        assert_eq!(recovered.title(), "Stream recovered: Example TV");
+        assert_eq!(ended.title(), "Stream ended: Example TV");
     }
 
     #[test]
@@ -398,7 +440,7 @@ mod tests {
 
         let message = render(&notification(GAP, "gap:3:lost", body), None, NOW);
 
-        assert_eq!(message.title, "Lost gap: Example TV");
+        assert_eq!(message.title(), "Lost gap: Example TV");
         assert!(
             message.text.starts_with("25 s of track 140"),
             "{}",
@@ -421,7 +463,7 @@ mod tests {
             NOW,
         );
 
-        assert_eq!(message.title, "Service started: dalsegno 0.5.0");
+        assert_eq!(message.title(), "Service started: dalsegno 0.5.0");
         assert_eq!(message.text, "Requeued 2 interrupted jobs.");
         assert_eq!(message.link.unwrap().label, "Open the jobs");
     }
@@ -472,7 +514,7 @@ mod tests {
             NOW,
         );
 
-        assert_eq!(message.title, "Daily summary");
+        assert_eq!(message.title(), "Daily summary");
         assert_eq!(
             message.text,
             "- Example TV: recording, period 42244.7 s, 1 fragment to fill, 0 lost.\n\
@@ -523,11 +565,55 @@ mod tests {
     }
 
     #[test]
+    fn the_stream_is_kept_apart_from_what_happened() {
+        let body = json!({ "stream": "Example TV", "itag": 140, "seconds": 25.0 });
+
+        let message = render(&notification(GAP, "gap:3:lost", body), None, NOW);
+
+        assert_eq!(message.event, "Lost gap");
+        assert_eq!(message.subject.as_deref(), Some("Example TV"));
+        assert_eq!(message.tone, Tone::Bad);
+    }
+
+    #[test]
+    fn the_tone_follows_how_serious_it_is() {
+        let tone = |kind: &str, subject: &str, body: Value| {
+            render(&notification(kind, subject, body), None, NOW).tone
+        };
+        let quiet = json!({ "streams": [{ "lost": 0 }], "failed": [] });
+        let lossy = json!({ "streams": [{ "lost": 2 }], "failed": [] });
+
+        assert_eq!(tone(STREAM, "stream:1:recovered:5", json!({})), Tone::Good);
+        assert_eq!(tone(STREAM, "stream:1:error:5", json!({})), Tone::Bad);
+        assert_eq!(
+            tone(CHANGE, "change:7:provisional", json!({})),
+            Tone::Notice
+        );
+        assert_eq!(tone(SERVICE, "service:started:1", json!({})), Tone::Good);
+        let ignored = json!({ "ignored": ["x"] });
+        assert_eq!(tone(SERVICE, "service:started:1", ignored), Tone::Notice);
+        assert_eq!(tone(SUMMARY, "summary:2026-11-05", quiet), Tone::Good);
+        assert_eq!(tone(SUMMARY, "summary:2026-11-05", lossy), Tone::Notice);
+    }
+
+    #[test]
+    fn a_start_and_a_summary_are_about_no_stream() {
+        let start = render(
+            &notification(SERVICE, "service:started:1", json!({ "version": "0.5.0" })),
+            None,
+            NOW,
+        );
+
+        assert_eq!(start.subject, None);
+        assert_eq!(start.title(), "Service started: dalsegno 0.5.0");
+    }
+
+    #[test]
     fn an_unknown_kind_still_says_something() {
         let message = render(&notification("other", "x:1", json!({})), None, NOW);
 
         assert_eq!(
-            (message.title.as_str(), message.text.as_str()),
+            (message.title().as_str(), message.text.as_str()),
             ("other", "x:1")
         );
         assert_eq!(message.link, None);
@@ -542,6 +628,6 @@ mod tests {
 
         let message = render(&broken, None, NOW);
 
-        assert_eq!(message.title, "Stream ended: unknown");
+        assert_eq!(message.title(), "Stream ended: unknown");
     }
 }
