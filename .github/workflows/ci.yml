@@ -22,6 +22,10 @@ jobs:
         run: |
           docker run --rm dalsegno dalsegno --json doctor \
             | jq --exit-status '.tools | all(.path != null)'
+      - name: Its ffmpeg can refuse redirects, as the thumbnail fetch asks it to
+        run: |
+          docker run --rm dalsegno ffmpeg -hide_banner -h protocol=https \
+            | grep -- '-max_redirects' > /dev/null
       - name: The service starts and stops on its stop signal
         run: |
           docker run --detach --name dalsegno dalsegno
@@ -59,3 +63,13 @@ jobs:
           tool: cargo-llvm-cov
       - name: Coverage summary
         run: cargo llvm-cov --workspace --ignore-filename-regex 'crates/cli/' --summary-only
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: No dependency has a RustSec advisory
+        run: cargo audit

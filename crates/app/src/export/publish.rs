@@ -153,9 +153,11 @@ impl Library {
             });
         };
         lock(&self.database)?.set_clip_plex_status(clip.id, PlexStatus::Requested)?;
-        let client = Plex::new(&plex.url, plex.token.clone());
         let relative = format!("{name}/{name}.mp4");
-        let is_listed = confirm(&client, plex.section, &relative, interval, polls).await;
+        let is_listed = match Plex::new(&plex.url, plex.token.clone()) {
+            Ok(client) => confirm(&client, plex.section, &relative, interval, polls).await,
+            Err(error) => Err(error.into()),
+        };
         let status = match is_listed {
             Ok(true) => PlexStatus::Confirmed,
             Ok(false) | Err(_) => PlexStatus::Failed,

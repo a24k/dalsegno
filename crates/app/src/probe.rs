@@ -183,10 +183,11 @@ async fn probe_once<R: Resolver>(
             Err(reason) => rejected.push(rejection(format, reason)),
         }
     }
+    let title = printable(&info.title);
     Ok(ProbeReport {
-        short_name: propose_short_name(&info.title),
-        title: info.title,
-        channel: info.channel,
+        short_name: propose_short_name(&title),
+        title,
+        channel: info.channel.as_deref().map(printable),
         channel_id: info.channel_id,
         thumbnail: info.thumbnail,
         family: used,
@@ -373,9 +374,38 @@ async fn check_video_pair(tools: &ProbeTools, first: &[u8], second: &[u8]) -> Re
         .map_err(|error| format!("mp4 compatibility: {error}"))
 }
 
+/// Third-party text without control characters, which could drive a terminal it is printed on,
+/// or the invisible marks that reorder or hide text. Line breaks and tabs become spaces.
+fn printable(text: &str) -> String {
+    text.chars()
+        .filter_map(|character| match character {
+            '\n' | '\r' | '\t' => Some(' '),
+            other if other.is_control() || is_invisible_mark(other) => None,
+            other => Some(other),
+        })
+        .collect()
+}
+
+/// Zero-width characters, direction marks and embeddings, and the byte order mark.
+fn is_invisible_mark(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}'
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_characters_leave_a_title() {
+        assert_eq!(
+            printable("Example\u{1b}]0;x\u{7}\u{1b}[31m TV\nLive"),
+            "Example]0;x[31m TV Live"
+        );
+        assert_eq!(printable("Ex\u{202E}ample\u{200B} TV"), "Example TV");
+    }
     use dalsegno_test_support::require_fixtures;
 
     fn numbered_files(directory: &Path) -> Vec<PathBuf> {

@@ -138,7 +138,8 @@ impl Ffmpeg {
         run(&self.ffmpeg, &args, FRAME_TIMEOUT).await.map(|_| ())
     }
 
-    /// Converts a stream's thumbnail to a jpg, over HTTPS only.
+    /// Converts a stream's thumbnail to a jpg, over HTTPS only and without following redirects,
+    /// so the checked host is the one fetched.
     pub async fn fetch_thumbnail(&self, url: &str, output: &Path) -> Result<(), ToolError> {
         let args = args_of([
             "-v".into(),
@@ -146,6 +147,8 @@ impl Ffmpeg {
             "-y".into(),
             "-protocol_whitelist".into(),
             "https,tls,tcp".into(),
+            "-max_redirects".into(),
+            "0".into(),
             "-i".into(),
             url.into(),
             "-frames:v".into(),

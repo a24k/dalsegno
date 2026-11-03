@@ -2,8 +2,10 @@
 
 use dalsegno_core::redact::Redacted;
 use serde::Deserialize;
+use std::time::Duration;
 
 const TOKEN_HEADER: &str = "X-Plex-Token";
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Why Plex could not be reached. Details are dropped, as errors from the client can carry the
 /// request.
@@ -62,12 +64,18 @@ struct Part {
 
 impl Plex {
     /// Addresses a server. The token travels in a header, so it stays out of URLs and logs.
-    pub fn new(base: &str, token: Redacted<String>) -> Self {
-        Self {
-            client: reqwest::Client::new(),
+    /// Redirects are not followed, as the token header would go along to wherever they lead.
+    pub fn new(base: &str, token: Redacted<String>) -> Result<Self, PlexError> {
+        let client = reqwest::Client::builder()
+            .timeout(TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| PlexError::Unreachable)?;
+        Ok(Self {
+            client,
             base: base.trim_end_matches('/').to_string(),
             token,
-        }
+        })
     }
 
     /// Asks Plex to scan a library section.
@@ -125,6 +133,7 @@ mod tests {
             &format!("{}/", server.uri()),
             Redacted::new("token-value".to_string()),
         )
+        .unwrap()
     }
 
     fn library() -> serde_json::Value {
@@ -235,15 +244,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_redirect_is_not_followed_with_the_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/library/sections/3/refresh"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("Location", format!("{}/elsewhere", server.uri())),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(path("/elsewhere"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        assert_eq!(plex(&server).refresh(3).await, Err(PlexError::Status(302)));
+    }
+
+    #[tokio::test]
     async fn an_unreachable_server_is_named() {
-        let plex = Plex::new("http://127.0.0.1:1", Redacted::new(String::new()));
+        let plex = Plex::new("http://127.0.0.1:1", Redacted::new(String::new())).unwrap();
 
         assert_eq!(plex.refresh(3).await, Err(PlexError::Unreachable));
     }
 
     #[test]
     fn the_token_never_prints() {
-        let plex = Plex::new("http://x", Redacted::new("token-value".to_string()));
+        let plex = Plex::new("http://x", Redacted::new("token-value".to_string())).unwrap();
 
         assert!(!format!("{plex:?}").contains("token-value"));
     }

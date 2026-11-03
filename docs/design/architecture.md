@@ -138,7 +138,7 @@ proxy (D-20).
 
 | Concern | Control |
 | --- | --- |
-| Exposure | Bind `127.0.0.1` unless configured. Reject state-changing requests with a foreign `Origin`. |
+| Exposure | Bind `127.0.0.1` unless configured. Refuse a `Host` that is not loopback, an address or the public URL's host, so DNS rebinding cannot reach the API. Reject state-changing requests with a foreign `Origin`. |
 | Command injection | Child processes take argument vectors, never a shell. Video IDs must match `^[A-Za-z0-9_-]{11}$`. Paths given to ffmpeg are absolute. |
 | Path traversal | Output names reject separators, control characters and leading dots, and are limited to 200 bytes after NFC normalisation. Resolved paths must stay under the library root. |
 | Secret leakage | A `Redacted` wrapper for fragment URLs, cookies and tokens. Logs carry the stream and `sq`, never query strings. |

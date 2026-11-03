@@ -2,6 +2,8 @@
 
 /// A window with a larger share of invalid samples scores nothing.
 const MAX_INVALID_SHARE: f64 = 0.1;
+/// The largest index a time can turn into: far past any series, with room to add a length.
+const MAX_INDEX: f64 = (u32::MAX as f64) * 1024.0;
 
 /// Values at a constant rate, some of which may be missing.
 #[derive(Debug, Clone, PartialEq)]
@@ -90,9 +92,12 @@ impl Prepared {
     }
 
     /// Returns the sample at a stream time, or `None` before the series.
+    /// A time that is not finite, or past any series that fits in memory, has no index either,
+    /// so adding a length to the index cannot overflow.
     pub fn index_of(&self, time: f64) -> Option<usize> {
         let index = ((time - self.start_time) * self.rate).round();
-        (index >= 0.0).then_some(index as usize)
+        let is_usable = (0.0..=MAX_INDEX).contains(&index);
+        is_usable.then_some(index as usize)
     }
 
     /// Converts seconds to samples.
@@ -155,6 +160,17 @@ fn fill_holes(values: &[f32], measured: &[bool]) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_time_that_cannot_be_an_index_has_none() {
+        let series = Prepared::new(&Series::complete(0.0, 10.0, vec![0.0; 4]));
+
+        assert_eq!(series.index_of(0.2), Some(2));
+        assert_eq!(series.index_of(f64::INFINITY), None);
+        assert_eq!(series.index_of(f64::NAN), None);
+        assert_eq!(series.index_of(1e300), None);
+        assert_eq!(series.index_of(-1.0), None);
+    }
 
     fn with_hole(values: &[f32], hole: std::ops::Range<usize>) -> Series {
         let mut series = Series::complete(100.0, 10.0, values.to_vec());
