@@ -6,11 +6,33 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A notification, worded but not yet marked up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    /// What happened and to what, read first.
+    pub title: String,
+    /// The details.
+    pub text: String,
+    /// Where to act on it.
+    pub link: Option<Link>,
+}
+
+/// A link that reads as words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    /// What following it does, such as "Open the change".
+    pub label: String,
+    /// Where it goes.
+    pub url: String,
+}
+
 /// How a webhook wants its message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebhookFormat {
-    /// `{"text": ...}`, which Slack and Mattermost both read.
+    /// `{"text": ...}` in Slack's mrkdwn.
     Slack,
+    /// `{"text": ...}` in Markdown, which Mattermost reads and Slack does not.
+    Mattermost,
     /// The message as a plain body, as ntfy reads it.
     Ntfy,
 }
@@ -19,11 +41,70 @@ impl WebhookFormat {
     /// Reads a setting.
     pub fn parse(text: &str) -> Option<Self> {
         match text {
-            "slack" | "mattermost" => Some(Self::Slack),
+            "slack" => Some(Self::Slack),
+            "mattermost" => Some(Self::Mattermost),
             "ntfy" => Some(Self::Ntfy),
             _ => None,
         }
     }
+
+    /// Marks a message up for this format: the title in bold, then the text, then the link.
+    pub fn markup(self, message: &Message) -> String {
+        let (title, text) = match self {
+            Self::Slack => (
+                format!("*{}*", escape_mrkdwn(&message.title)),
+                escape_mrkdwn(&message.text),
+            ),
+            Self::Mattermost => (
+                format!("**{}**", escape_markdown(&message.title)),
+                escape_markdown(&message.text),
+            ),
+            Self::Ntfy => (message.title.clone(), message.text.clone()),
+        };
+        let link = message.link.as_ref().map(|link| match self {
+            Self::Slack => format!(
+                "<{}|{}>",
+                escape_mrkdwn(&link.url).replace('|', "%7C"),
+                escape_mrkdwn(&link.label)
+            ),
+            Self::Mattermost => format!(
+                "[{}]({})",
+                escape_markdown(&link.label),
+                link.url
+                    .replace(' ', "%20")
+                    .replace('(', "%28")
+                    .replace(')', "%29")
+            ),
+            Self::Ntfy => format!("{}: {}", link.label, link.url),
+        });
+        [Some(title), Some(text), link]
+            .into_iter()
+            .flatten()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Slack reads `&`, `<` and `>` as control characters, and has no other escape, so a `*` in a
+/// stream name can still end the bold early.
+fn escape_mrkdwn(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Escapes the characters that would start emphasis, code, links or HTML.
+fn escape_markdown(text: &str) -> String {
+    text.chars()
+        .flat_map(|character| {
+            let is_special = matches!(
+                character,
+                '\\' | '*' | '_' | '`' | '~' | '[' | ']' | '<' | '>'
+            );
+            is_special.then_some('\\').into_iter().chain([character])
+        })
+        .collect()
 }
 
 /// Why a message was not delivered. Details are dropped, as the URL can embed a secret.
@@ -62,13 +143,14 @@ impl Webhook {
     }
 
     /// Sends a message.
-    pub async fn send(&self, text: &str) -> Result<(), WebhookError> {
+    pub async fn send(&self, message: &Message) -> Result<(), WebhookError> {
+        let text = self.format.markup(message);
         let request = self.client.post(self.url.expose());
         let request = match self.format {
-            WebhookFormat::Slack => request
+            WebhookFormat::Slack | WebhookFormat::Mattermost => request
                 .header("Content-Type", "application/json")
                 .body(json!({ "text": text }).to_string()),
-            WebhookFormat::Ntfy => request.body(text.to_string()),
+            WebhookFormat::Ntfy => request.body(text),
         };
         let response = request
             .send()
@@ -93,18 +175,52 @@ mod tests {
         Webhook::new(Redacted::new(server.uri()), format).unwrap()
     }
 
+    fn message(title: &str, text: &str) -> Message {
+        Message {
+            title: title.to_string(),
+            text: text.to_string(),
+            link: Some(Link {
+                label: "Open the change".to_string(),
+                url: "https://dalsegno.example/changes/7".to_string(),
+            }),
+        }
+    }
+
+    fn hello() -> Message {
+        Message {
+            link: None,
+            ..message("Hello", "world")
+        }
+    }
+
     #[tokio::test]
     async fn slack_gets_json() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(body_json(json!({ "text": "hello" })))
+            .and(body_json(json!({ "text": "*Hello*\nworld" })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
         hook(&server, WebhookFormat::Slack)
-            .send("hello")
+            .send(&hello())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mattermost_gets_json() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_json(json!({ "text": "**Hello**\nworld" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        hook(&server, WebhookFormat::Mattermost)
+            .send(&hello())
             .await
             .unwrap();
     }
@@ -113,16 +229,88 @@ mod tests {
     async fn ntfy_gets_the_message_itself() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(body_string("hello"))
+            .and(body_string("Hello\nworld"))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
         hook(&server, WebhookFormat::Ntfy)
-            .send("hello")
+            .send(&hello())
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn slack_reads_the_link_as_words() {
+        let text = WebhookFormat::Slack.markup(&message("Change seen: A & B", "x < y"));
+
+        assert_eq!(
+            text,
+            "*Change seen: A &amp; B*\nx &lt; y\n<https://dalsegno.example/changes/7|Open the change>"
+        );
+    }
+
+    #[test]
+    fn mattermost_reads_the_link_as_words() {
+        let text = WebhookFormat::Mattermost.markup(&message("Change seen: *A_B*", "x"));
+
+        assert_eq!(
+            text,
+            "**Change seen: \\*A\\_B\\***\nx\n[Open the change](https://dalsegno.example/changes/7)"
+        );
+    }
+
+    #[test]
+    fn a_link_with_special_characters_stays_one_link() {
+        let odd = Message {
+            link: Some(Link {
+                label: "Open [it]".to_string(),
+                url: "https://dalsegno.example/a b(c)?d=1&e|f".to_string(),
+            }),
+            ..message("T", "x")
+        };
+
+        assert!(
+            WebhookFormat::Slack
+                .markup(&odd)
+                .ends_with("<https://dalsegno.example/a b(c)?d=1&amp;e%7Cf|Open [it]>")
+        );
+        assert!(
+            WebhookFormat::Mattermost
+                .markup(&odd)
+                .ends_with("[Open \\[it\\]](https://dalsegno.example/a%20b%28c%29?d=1&e|f)")
+        );
+    }
+
+    #[test]
+    fn mattermost_escapes_the_text_too() {
+        let text = WebhookFormat::Mattermost.markup(&Message {
+            link: None,
+            ..message("T", "a\\b `c`")
+        });
+
+        assert_eq!(text, "**T**\na\\\\b \\`c\\`");
+    }
+
+    #[test]
+    fn an_empty_text_leaves_no_blank_line() {
+        let text = WebhookFormat::Slack.markup(&message("T", ""));
+
+        assert_eq!(
+            text,
+            "*T*\n<https://dalsegno.example/changes/7|Open the change>"
+        );
+    }
+
+    #[test]
+    fn ntfy_keeps_plain_text() {
+        let text = WebhookFormat::Ntfy.markup(&message("Change seen: *A*", "x"));
+
+        assert_eq!(
+            text,
+            "Change seen: *A*\nx\nOpen the change: https://dalsegno.example/changes/7"
+        );
     }
 
     #[tokio::test]
@@ -133,7 +321,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let sent = hook(&server, WebhookFormat::Slack).send("hello").await;
+        let sent = hook(&server, WebhookFormat::Slack).send(&hello()).await;
 
         assert_eq!(sent, Err(WebhookError::Status(503)));
     }
@@ -154,7 +342,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let sent = hook(&server, WebhookFormat::Slack).send("hello").await;
+        let sent = hook(&server, WebhookFormat::Slack).send(&hello()).await;
 
         assert_eq!(sent, Err(WebhookError::Status(302)));
     }
@@ -164,18 +352,20 @@ mod tests {
         let url = Redacted::new("http://127.0.0.1:9/sesame".to_string());
         let hook = Webhook::new(url, WebhookFormat::Slack).unwrap();
 
-        let error = hook.send("hello").await.unwrap_err();
+        let error = hook.send(&hello()).await.unwrap_err();
 
         assert_eq!(error, WebhookError::Unreachable);
         assert!(!format!("{error} {error:?} {hook:?}").contains("sesame"));
     }
 
     #[test]
-    fn mattermost_reads_the_slack_format() {
+    fn each_format_is_read_from_its_name() {
+        assert_eq!(WebhookFormat::parse("slack"), Some(WebhookFormat::Slack));
         assert_eq!(
             WebhookFormat::parse("mattermost"),
-            Some(WebhookFormat::Slack)
+            Some(WebhookFormat::Mattermost)
         );
+        assert_eq!(WebhookFormat::parse("ntfy"), Some(WebhookFormat::Ntfy));
         assert_eq!(WebhookFormat::parse("smoke signals"), None);
     }
 }

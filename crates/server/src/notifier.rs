@@ -6,7 +6,7 @@
 use crate::runner::now_ms;
 use dalsegno_app::fetch::{SharedDatabase, lock};
 use dalsegno_app::notify::{SERVICE, render};
-use dalsegno_io::webhook::Webhook;
+use dalsegno_io::webhook::{Message, Webhook};
 use dalsegno_store::notifications::Notification;
 use serde_json::json;
 use std::fmt::Debug;
@@ -44,14 +44,14 @@ pub type SendFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 /// Delivers a message.
 pub trait Sender: Debug + Send + Sync + 'static {
     /// Sends a message.
-    fn send(&self, text: String) -> SendFuture;
+    fn send(&self, message: Message) -> SendFuture;
 }
 
 impl Sender for Webhook {
-    fn send(&self, text: String) -> SendFuture {
+    fn send(&self, message: Message) -> SendFuture {
         let hook = self.clone();
         Box::pin(async move {
-            Webhook::send(&hook, &text)
+            Webhook::send(&hook, &message)
                 .await
                 .map_err(|error| error.to_string())
         })
@@ -107,8 +107,8 @@ impl Notifier {
     /// Sends in order, and stops at the first failure so that order holds.
     async fn drain(&self) -> Result<(), String> {
         for notification in self.pending()? {
-            let text = render(&notification, self.public_url.as_deref(), now_ms());
-            let sent = self.sender.send(text).await;
+            let message = render(&notification, self.public_url.as_deref(), now_ms());
+            let sent = self.sender.send(message).await;
             let database = lock(&self.database).map_err(|error| error.to_string())?;
             match sent {
                 Ok(()) => database.mark_notification_sent(notification.id, now_ms()),
@@ -140,12 +140,12 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct Recording {
-        sent: Mutex<Vec<String>>,
+        sent: Mutex<Vec<Message>>,
         failures: Mutex<u32>,
     }
 
     impl Sender for Arc<Recording> {
-        fn send(&self, text: String) -> SendFuture {
+        fn send(&self, message: Message) -> SendFuture {
             let this = Arc::clone(self);
             Box::pin(async move {
                 let mut failures = this.failures.lock().unwrap();
@@ -153,7 +153,7 @@ mod tests {
                     *failures -= 1;
                     return Err("offline".to_string());
                 }
-                this.sent.lock().unwrap().push(text);
+                this.sent.lock().unwrap().push(message);
                 Ok(())
             })
         }
@@ -195,10 +195,8 @@ mod tests {
 
         assert_eq!(pending(&database), 0);
         let sent = sender.sent.lock().unwrap();
-        assert!(
-            sent[0].ends_with(": a") && sent[1].ends_with(": b"),
-            "{sent:?}"
-        );
+        let texts: Vec<_> = sent.iter().map(|message| message.text.as_str()).collect();
+        assert_eq!(texts, ["a", "b"]);
     }
 
     #[tokio::test]
@@ -223,12 +221,12 @@ mod tests {
 
         let sent = sender.sent.lock().unwrap();
         let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(sent.len(), 1);
         assert_eq!(
-            sent[..],
-            [format!(
-                "dalsegno {version} started, and requeued 3 interrupted jobs."
-            )]
+            sent[0].title,
+            format!("Service started: dalsegno {version}")
         );
+        assert_eq!(sent[0].text, "Requeued 3 interrupted jobs.");
     }
 
     #[tokio::test]

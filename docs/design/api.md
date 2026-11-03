@@ -106,13 +106,16 @@ Each Web UI operation calls the same API, so it can be reproduced from the CLI.
 
 ## Notifications
 
-Every notification links to the relevant Web UI screen. An illustrative example, which is not
-a test oracle:
+Every notification links to the relevant Web UI screen. It opens in bold with what happened
+and to which stream, then gives the details, then the link as words such as "Open the change".
+Deadlines are shown in Japan time with the hours left. The `slack` format marks this up in
+mrkdwn, `mattermost` in Markdown, and `ntfy` gets plain text. An illustrative example, which is
+not a test oracle:
 
 ```text
-Example TV: period changed around 10/31 01:06 (38,376.7 s -> 42,244.7 s).
-3 new regions (about 8, 56 and 7 min). Video already fetched.
-Export the full cycle by 11/04 22:00.
+**Change seen: Example TV**
++455.0 s so far. Export the old version by 11/04 22:00 JST (48 hours left) before it leaves the DVR.
+[Open the change](https://dalsegno.example/changes/7)
 ```
 
 ## Web UI
