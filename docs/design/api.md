@@ -109,15 +109,21 @@ Each Web UI operation calls the same API, so it can be reproduced from the CLI.
 Every notification links to the relevant Web UI screen. It opens in bold with what happened
 and to which stream, then gives the details, then the link as words such as "Open the change".
 Deadlines are shown in Japan time with the hours left. The `slack` format marks this up in
-mrkdwn, `mattermost` in Markdown, and `ntfy` gets plain text. When `daily_summary` is set, a
+mrkdwn and `ntfy` gets plain text. `mattermost` sends a short message saying it is from
+dalsegno and which stream it is about, and an attachment with what happened as its title
+(linked to the screen), the details, and the version; its colour is red for a lost gap or a
+stream error, amber for a change, a deadline, an end or a summary with losses or failures, and
+green otherwise. When `daily_summary` is set, a
 summary goes out once a day at that time, or at start when the service starts later that day, with a line per stream that has not ended (state,
 period, fragments to fill and lost) and the jobs that failed since the last one. An
 illustrative example, which is not a test oracle:
 
 ```text
-**Change seen: Example TV**
-+455.0 s so far. Export the old version by 11/04 22:00 JST (48 hours left) before it leaves the DVR.
-[Open the change](https://dalsegno.example/changes/7)
+dalsegno `Example TV`
+| Change seen                                  (amber, linked to /changes/7)
+| +455.0 s so far. Export the old version by 11/04 22:00 JST (48 hours left) before it
+| leaves the DVR.
+| dalsegno 0.5.0
 ```
 
 ## Web UI

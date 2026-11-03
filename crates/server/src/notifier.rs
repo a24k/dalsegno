@@ -232,7 +232,7 @@ mod tests {
         let version = env!("CARGO_PKG_VERSION");
         assert_eq!(sent.len(), 1);
         assert_eq!(
-            sent[0].title,
+            sent[0].title(),
             format!("Service started: dalsegno {version}")
         );
         assert_eq!(sent[0].text, "Requeued 3 interrupted jobs.");
