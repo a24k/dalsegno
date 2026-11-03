@@ -98,7 +98,16 @@ pub async fn serve(config: &Config, policy: IpPolicy, limits: FetchLimits) -> an
         limits,
     })?;
     let listener = TcpListener::bind(config.bind).await?;
-    let api = router(ApiState::new(library.clone()));
+    // The image binds every address inside its container and leaves the limit to the published
+    // port, so this is a reminder at start rather than a warning on every run.
+    if !config.bind.ip().is_loopback() {
+        tracing::info!(
+            bind = %config.bind,
+            "the API has no login of its own, so anything beyond loopback needs an \
+             authenticating proxy in front (D-20)"
+        );
+    }
+    let api = router(ApiState::new(library.clone(), config.public_url.as_deref()));
     let service = Arc::new(Service {
         acquisition,
         library,

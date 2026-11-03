@@ -5,7 +5,8 @@
 
 use crate::runner::now_ms;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, Method, StatusCode, header};
+use axum::http::uri::Authority;
+use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -18,6 +19,7 @@ use dalsegno_store::jobs::{JobRow, JobState};
 use dalsegno_store::status::{ChangeStatus, Listing, RegionStatus, StreamStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::net::IpAddr;
 use tokio::task::spawn_blocking;
 
 const DEFAULT_LIMIT: u32 = 50;
@@ -28,13 +30,29 @@ const MAX_LIMIT: u32 = 200;
 pub struct ApiState {
     library: Library,
     database: SharedDatabase,
+    /// The host of the public URL, which the proxy in front passes on.
+    public_host: Option<String>,
 }
 
 impl ApiState {
-    /// Makes the state.
-    pub fn new(library: Library) -> Self {
+    /// Makes the state. `public_url` is where the operator reaches the service, if anywhere
+    /// beyond this machine.
+    pub fn new(library: Library, public_url: Option<&str>) -> Self {
         let database = library.database();
-        Self { library, database }
+        let public_host = public_url
+            .and_then(|url| url.parse::<Uri>().ok())
+            .and_then(|uri| uri.host().map(str::to_ascii_lowercase));
+        if public_url.is_some() && public_host.is_none() {
+            tracing::warn!(
+                "DALSEGNO_PUBLIC_URL has no host, such as https://dalsegno.example, so the API \
+                 answers only to loopback and addresses"
+            );
+        }
+        Self {
+            library,
+            database,
+            public_host,
+        }
     }
 }
 
@@ -401,6 +419,44 @@ async fn reject_foreign_origin(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
+/// Whether a `Host` header names this service: loopback, an address, or the public URL's host.
+/// A name that only resolves here, as a DNS-rebinding page uses, is not one of them.
+fn is_known_host(host: &str, public_host: Option<&str>) -> bool {
+    // Userinfo is no part of a Host header, and would hide the name that follows it.
+    let Ok(authority) = host.parse::<Authority>() else {
+        return false;
+    };
+    if authority.as_str().contains('@') {
+        return false;
+    }
+    let name = authority
+        .host()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    name == "localhost" || name.parse::<IpAddr>().is_ok() || public_host == Some(name.as_str())
+}
+
+/// Refuses requests for a host this service does not answer to. The host is the `Host` header,
+/// or the request's authority as HTTP/2 sends it. A request with neither, which no browser
+/// sends, passes.
+async fn reject_unknown_host(
+    State(state): State<ApiState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let header_host = request
+        .headers()
+        .get(header::HOST)
+        .map(|host| host.to_str().unwrap_or_default().to_string());
+    let host = header_host.or_else(|| request.uri().authority().map(ToString::to_string));
+    let is_known = host.is_none_or(|host| is_known_host(&host, state.public_host.as_deref()));
+    if !is_known {
+        return ApiError::new(StatusCode::FORBIDDEN, "forbidden", "unknown host").into_response();
+    }
+    next.run(request).await
+}
+
 async fn unknown_route() -> ApiError {
     ApiError::not_found()
 }
@@ -420,6 +476,10 @@ pub fn router(state: ApiState) -> Router {
         .nest("/api/v1", api)
         .fallback(unknown_route)
         .layer(middleware::from_fn(reject_foreign_origin))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            reject_unknown_host,
+        ))
         .with_state(state)
 }
 
@@ -444,7 +504,7 @@ mod tests {
     fn fixture() -> Fixture {
         let root = tempdir().unwrap();
         let library = Library::open(root.path()).unwrap();
-        let state = ApiState::new(library);
+        let state = ApiState::new(library, Some("https://dalsegno.example/"));
         let stream = lock(&state.database)
             .unwrap()
             .insert_stream(&NewStream {
@@ -621,6 +681,66 @@ mod tests {
             .unwrap();
 
         assert_eq!(send(&fixture, request).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_rebound_host_cannot_read_or_change_state() {
+        let fixture = fixture();
+        let read = Request::get("/api/v1/streams")
+            .header(header::HOST, "rebind.example:8737")
+            .body(Body::empty())
+            .unwrap();
+        let change = Request::post(format!("/api/v1/streams/{}/start", fixture.stream))
+            .header(header::ORIGIN, "http://rebind.example:8737")
+            .header(header::HOST, "rebind.example:8737")
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(send(&fixture, read).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(send(&fixture, change).await.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_request_without_a_host_passes() {
+        let fixture = fixture();
+        let request = Request::get("/api/v1/streams").body(Body::empty()).unwrap();
+
+        assert_eq!(send(&fixture, request).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_public_host_can_change_state() {
+        let fixture = fixture();
+        let request = Request::post(format!("/api/v1/streams/{}/start", fixture.stream))
+            .header(header::ORIGIN, "https://dalsegno.example")
+            .header(header::HOST, "dalsegno.example")
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(send(&fixture, request).await.0, StatusCode::OK);
+    }
+
+    #[test]
+    fn loopback_addresses_and_the_public_host_are_known() {
+        let public = Some("dalsegno.example");
+
+        for host in [
+            "localhost:8737",
+            "127.0.0.1:8737",
+            "[::1]:8737",
+            "172.18.0.5",
+            "Dalsegno.Example",
+        ] {
+            assert!(is_known_host(host, public), "{host}");
+        }
+        for host in [
+            "rebind.example",
+            "dalsegno.example.evil",
+            "not a host",
+            "rebind.example@localhost",
+        ] {
+            assert!(!is_known_host(host, public), "{host}");
+        }
     }
 
     #[test]

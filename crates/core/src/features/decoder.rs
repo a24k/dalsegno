@@ -26,6 +26,10 @@ impl fmt::Debug for AacStream {
     }
 }
 
+/// The highest AAC sample rate in the standard table. A crafted config can claim any rate, and
+/// the envelope filter divides by it and sizes itself from it.
+const MAX_SAMPLE_RATE: u32 = 96_000;
+
 impl AacStream {
     /// Creates a decoder from an `AudioSpecificConfig`. Only AAC-LC is accepted.
     pub fn new(audio_config: &[u8]) -> Result<Self, FeatureError> {
@@ -37,7 +41,8 @@ impl AacStream {
         let sample_rate = decoder
             .codec_params()
             .sample_rate
-            .ok_or_else(|| FeatureError::Unsupported("no sample rate".to_string()))?;
+            .filter(|rate| (1..=MAX_SAMPLE_RATE).contains(rate))
+            .ok_or_else(|| FeatureError::Unsupported("no usable sample rate".to_string()))?;
         Ok(Self {
             decoder,
             sample_rate,
@@ -82,6 +87,23 @@ mod tests {
         assert_eq!(
             AacStream::new(&STEREO_44100_LC).unwrap().sample_rate(),
             44_100
+        );
+    }
+
+    #[test]
+    fn rejects_a_sample_rate_outside_the_table() {
+        // AAC-LC with an explicit 24-bit rate. Symphonia refuses 0 Hz itself; above the table,
+        // 192 kHz here, is refused by the bound.
+        let zero = AacStream::new(&[0x17, 0x80, 0x00, 0x00, 0x10]).err();
+        let high = AacStream::new(&[0x17, 0x81, 0x77, 0x00, 0x10]).err();
+
+        assert!(
+            matches!(zero, Some(FeatureError::Unsupported(_))),
+            "{zero:?}"
+        );
+        assert!(
+            matches!(&high, Some(FeatureError::Unsupported(why)) if why == "no usable sample rate"),
+            "{high:?}"
         );
     }
 

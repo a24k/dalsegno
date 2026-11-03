@@ -40,7 +40,8 @@ docker compose exec dalsegno dalsegno status
 ```
 
 The API listens on loopback only, as it has no login of its own; anything wider needs an
-authenticating proxy in front (D-20). Pin an exact release or a release line such as `0.5`, so
+authenticating proxy in front (D-20). It answers only to loopback names, addresses and the host
+of `DALSEGNO_PUBLIC_URL`, so set that when a proxy forwards its own host name. Pin an exact release or a release line such as `0.5`, so
 that updates are a decision; release candidates (`-rc.N`) move neither `latest` nor a line
 (D-32).
 
