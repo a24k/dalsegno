@@ -440,6 +440,7 @@ version = "0.5.0-rc.6"
 dependencies = [
  "anyhow",
  "axum",
+ "chrono",
  "dalsegno-app",
  "dalsegno-io",
  "dalsegno-store",

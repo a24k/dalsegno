@@ -109,8 +109,10 @@ Each Web UI operation calls the same API, so it can be reproduced from the CLI.
 Every notification links to the relevant Web UI screen. It opens in bold with what happened
 and to which stream, then gives the details, then the link as words such as "Open the change".
 Deadlines are shown in Japan time with the hours left. The `slack` format marks this up in
-mrkdwn, `mattermost` in Markdown, and `ntfy` gets plain text. An illustrative example, which is
-not a test oracle:
+mrkdwn, `mattermost` in Markdown, and `ntfy` gets plain text. When `daily_summary` is set, a
+summary goes out once a day at that time, or at start when the service starts later that day, with a line per stream that has not ended (state,
+period, fragments to fill and lost) and the jobs that failed since the last one. An
+illustrative example, which is not a test oracle:
 
 ```text
 **Change seen: Example TV**

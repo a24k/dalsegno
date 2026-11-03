@@ -16,10 +16,12 @@ pub const STREAM: &str = "stream";
 pub const GAP: &str = "gap";
 /// The kind of a notification about the service itself.
 pub const SERVICE: &str = "service";
+/// The kind of the daily summary.
+pub const SUMMARY: &str = "summary";
 
 const HOUR_MS: f64 = 3_600_000.0;
-/// How a deadline is shown: month, day and time in Japan, where the operator is.
-const DEADLINE_FORMAT: &str = "%m/%d %H:%M %Z";
+/// How a time is shown: month, day and time in Japan, where the operator is.
+const TIME_FORMAT: &str = "%m/%d %H:%M %Z";
 
 fn number(body: &Value, key: &str) -> f64 {
     body[key].as_f64().unwrap_or(0.0)
@@ -53,12 +55,16 @@ fn time_left(deadline_ms: f64, now: i64) -> String {
     }
 }
 
+/// A time as the operator reads it.
+fn in_japan(ms: f64) -> Option<String> {
+    DateTime::from_timestamp_millis(ms as i64)
+        .map(|at| at.with_timezone(&Tokyo).format(TIME_FORMAT).to_string())
+}
+
 /// When the old version must be exported by, as date, time and hours left.
 fn by_deadline(body: &Value, now: i64) -> String {
     let deadline_ms = body["dvr_deadline_at"].as_f64();
-    let when = deadline_ms
-        .and_then(|ms| DateTime::from_timestamp_millis(ms as i64))
-        .map(|at| at.with_timezone(&Tokyo).format(DEADLINE_FORMAT));
+    let when = deadline_ms.and_then(in_japan);
     match (deadline_ms, when) {
         (Some(ms), Some(when)) => format!(" by {when} ({})", time_left(ms, now)),
         _ => String::new(),
@@ -74,6 +80,7 @@ fn link(notification: &Notification, public_url: Option<&str>) -> Option<Link> {
     let (label, path) = match change_id(&notification.subject) {
         Some(id) => ("Open the change", format!("changes/{id}")),
         None if notification.kind == SERVICE => ("Open the jobs", "jobs".to_string()),
+        None if notification.kind == SUMMARY => ("Open the dashboard", String::new()),
         None => ("Open the streams", "streams".to_string()),
     };
     Some(Link {
@@ -128,6 +135,52 @@ fn describe_start(body: &Value) -> (String, String) {
     )
 }
 
+/// One line for a stream in the summary.
+fn summary_line(stream: &Value) -> String {
+    let period = stream["period"].as_f64().map_or_else(
+        || "no period yet".to_string(),
+        |period| format!("period {period:.1} s"),
+    );
+    format!(
+        "- {}: {}, {period}, {} to fill, {} lost.",
+        text(stream, "stream").replace('\n', " "),
+        text(stream, "state"),
+        count(number(stream, "open"), "fragment"),
+        number(stream, "lost"),
+    )
+}
+
+fn describe_summary(body: &Value) -> (String, String) {
+    let streams = body["streams"].as_array().map_or(&[][..], Vec::as_slice);
+    let failed = body["failed"].as_array().map_or(&[][..], Vec::as_slice);
+    let since = in_japan(number(body, "since")).unwrap_or_else(|| "unknown".to_string());
+    let total: f64 = failed.iter().map(|kind| number(kind, "count")).sum();
+    let failures = if failed.is_empty() {
+        format!("No jobs failed since {since}.")
+    } else {
+        let kinds: Vec<String> = failed
+            .iter()
+            .map(|kind| format!("{} {}", text(kind, "kind"), number(kind, "count")))
+            .collect();
+        format!(
+            "{} failed since {since}: {}.",
+            count(total, "job"),
+            kinds.join(", ")
+        )
+    };
+    let lines: Vec<String> = if streams.is_empty() {
+        vec!["No streams are being recorded.".to_string()]
+    } else {
+        streams.iter().map(summary_line).collect()
+    };
+    let details = lines
+        .into_iter()
+        .chain([failures])
+        .collect::<Vec<_>>()
+        .join("\n");
+    ("Daily summary".to_string(), details)
+}
+
 /// Words a notification: what happened and to what, the details, and a link when a public
 /// URL is set.
 pub fn render(notification: &Notification, public_url: Option<&str>, now: i64) -> Message {
@@ -156,6 +209,7 @@ pub fn render(notification: &Notification, public_url: Option<&str>, now: i64) -
             ),
         ),
         SERVICE => describe_start(&body),
+        SUMMARY => describe_summary(&body),
         other => (other.to_string(), notification.subject.clone()),
     };
     Message {
@@ -371,6 +425,75 @@ mod tests {
 
         assert_eq!(start(1), "Requeued 1 interrupted job.");
         assert_eq!(start(0), "No interrupted jobs to requeue.");
+    }
+
+    #[test]
+    fn a_summary_gives_a_line_per_stream_and_the_failures() {
+        let body = json!({
+            "since": DEADLINE_MS,
+            "streams": [
+                { "stream": "Example TV", "state": "recording", "period": 42244.7,
+                  "open": 1, "lost": 0 },
+                { "stream": "Example Radio", "state": "error", "period": null,
+                  "open": 3, "lost": 2 },
+            ],
+            "failed": [{ "kind": "analysis", "count": 1 }, { "kind": "backfill", "count": 2 }],
+        });
+
+        let message = render(
+            &notification(SUMMARY, "summary:2026-11-05", body),
+            Some("https://dalsegno.example"),
+            NOW,
+        );
+
+        assert_eq!(message.title, "Daily summary");
+        assert_eq!(
+            message.text,
+            "- Example TV: recording, period 42244.7 s, 1 fragment to fill, 0 lost.\n\
+             - Example Radio: error, no period yet, 3 fragments to fill, 2 lost.\n\
+             3 jobs failed since 11/04 22:00 JST: analysis 1, backfill 2."
+        );
+        let link = message.link.unwrap();
+        assert_eq!(link.label, "Open the dashboard");
+        assert_eq!(link.url, "https://dalsegno.example/");
+    }
+
+    #[test]
+    fn a_title_cannot_add_a_line_to_the_summary() {
+        let body = json!({
+            "since": DEADLINE_MS,
+            "streams": [{ "stream": "Example\n- TV", "state": "recording" }],
+            "failed": [],
+        });
+
+        let message = render(
+            &notification(SUMMARY, "summary:2026-11-05", body),
+            None,
+            NOW,
+        );
+
+        assert!(
+            message.text.starts_with("- Example - TV: recording"),
+            "{}",
+            message.text
+        );
+        assert_eq!(message.text.lines().count(), 2);
+    }
+
+    #[test]
+    fn a_quiet_summary_says_so() {
+        let body = json!({ "since": DEADLINE_MS, "streams": [], "failed": [] });
+
+        let message = render(
+            &notification(SUMMARY, "summary:2026-11-05", body),
+            None,
+            NOW,
+        );
+
+        assert_eq!(
+            message.text,
+            "No streams are being recorded.\nNo jobs failed since 11/04 22:00 JST."
+        );
     }
 
     #[test]

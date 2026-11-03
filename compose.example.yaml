@@ -22,5 +22,7 @@ services:
       DALSEGNO_WEBHOOK: "${DALSEGNO_WEBHOOK:-}"
       DALSEGNO_WEBHOOK_FORMAT: mattermost
       DALSEGNO_PUBLIC_URL: "${DALSEGNO_PUBLIC_URL:-}"
+      # A summary of every stream once a day, at this time in Japan.
+      # DALSEGNO_DAILY_SUMMARY: "09:00"
       DALSEGNO_PLEX_URL: "${DALSEGNO_PLEX_URL:-}"
       DALSEGNO_PLEX_TOKEN: "${DALSEGNO_PLEX_TOKEN:-}"

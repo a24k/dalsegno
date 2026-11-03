@@ -1,9 +1,11 @@
 //! Queueing the work that recurs.
 
 use crate::runner::now_ms;
+use chrono::NaiveTime;
 use dalsegno_app::fetch::{SharedDatabase, lock};
 use dalsegno_app::lifecycle::StreamTarget;
 use dalsegno_app::notify::DEADLINE;
+use dalsegno_app::summary::enqueue_summary_if_due;
 use dalsegno_store::database::{Database, StoreError};
 use dalsegno_store::jobs::{JobClass, NewJob};
 use dalsegno_store::streams::{StreamRow, StreamState};
@@ -66,8 +68,9 @@ fn warn_of_deadlines(database: &Database, now: i64) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Queues what is due, and returns how many jobs that was.
-fn enqueue_due(database: &Database, now: i64) -> Result<usize, String> {
+/// Queues what is due, with the daily summary when it is on, and returns how many jobs that
+/// was.
+fn enqueue_due(database: &Database, summary: Option<NaiveTime>, now: i64) -> Result<usize, String> {
     let sweep = NewJob {
         kind: SWEEP.to_string(),
         class: JobClass::Cpu,
@@ -75,6 +78,10 @@ fn enqueue_due(database: &Database, now: i64) -> Result<usize, String> {
     };
     let swept = enqueue_if_due(database, &sweep, DAY_MS, now).map_err(|error| error.to_string())?;
     warn_of_deadlines(database, now).map_err(|error| error.to_string())?;
+    // The summary is extra, so a failure is logged rather than holding up the streams' work.
+    if let Some(Err(error)) = summary.map(|at| enqueue_summary_if_due(database, at, now)) {
+        tracing::error!(error = %error, "cannot queue the daily summary");
+    }
     let rows = database
         .streams_in_states(&[StreamState::Backfilling, StreamState::Recording])
         .map_err(|error| error.to_string())?;
@@ -83,12 +90,17 @@ fn enqueue_due(database: &Database, now: i64) -> Result<usize, String> {
     })
 }
 
-/// Looks at the schedule until `shutdown` turns true.
-pub async fn run_scheduler(database: SharedDatabase, mut shutdown: watch::Receiver<bool>) {
+/// Looks at the schedule until `shutdown` turns true. `summary` is when the daily summary
+/// goes out, if it is on.
+pub async fn run_scheduler(
+    database: SharedDatabase,
+    summary: Option<NaiveTime>,
+    mut shutdown: watch::Receiver<bool>,
+) {
     while !*shutdown.borrow() {
         let queued = lock(&database)
             .map_err(|error| error.to_string())
-            .and_then(|database| enqueue_due(&database, now_ms()));
+            .and_then(|database| enqueue_due(&database, summary, now_ms()));
         if let Err(error) = queued {
             tracing::error!(error, "cannot look at the schedule");
         }
@@ -135,11 +147,11 @@ mod tests {
     fn a_recording_stream_is_analysed_every_hour() {
         let (database, _) = with_stream(StreamState::Recording);
 
-        assert_eq!(enqueue_due(&database, 0).unwrap(), 3);
+        assert_eq!(enqueue_due(&database, None, 0).unwrap(), 3);
         finish_all(&database);
 
-        assert_eq!(enqueue_due(&database, HOUR_MS - 1).unwrap(), 0);
-        assert_eq!(enqueue_due(&database, HOUR_MS).unwrap(), 2);
+        assert_eq!(enqueue_due(&database, None, HOUR_MS - 1).unwrap(), 0);
+        assert_eq!(enqueue_due(&database, None, HOUR_MS).unwrap(), 2);
     }
 
     #[test]
@@ -147,7 +159,7 @@ mod tests {
         let (database, id) = with_stream(StreamState::Recording);
         database.add_gap(id, 140, 1, 2).unwrap();
 
-        assert_eq!(enqueue_due(&database, 0).unwrap(), 4);
+        assert_eq!(enqueue_due(&database, None, 0).unwrap(), 4);
     }
 
     fn with_change(deadline: i64) -> Database {
@@ -179,17 +191,30 @@ mod tests {
     fn a_near_deadline_is_warned_of_once() {
         let database = with_change(DEADLINE_WARNING_MS);
 
-        enqueue_due(&database, 0).unwrap();
-        enqueue_due(&database, 60_000).unwrap();
+        enqueue_due(&database, None, 0).unwrap();
+        enqueue_due(&database, None, 60_000).unwrap();
 
         assert_eq!(notifications(&database), 1);
+    }
+
+    #[test]
+    fn the_daily_summary_goes_out_only_when_it_is_on() {
+        let off = Database::open_in_memory().unwrap();
+        let on = Database::open_in_memory().unwrap();
+        let midnight = NaiveTime::from_hms_opt(0, 0, 0);
+
+        enqueue_due(&off, None, 0).unwrap();
+        enqueue_due(&on, midnight, 0).unwrap();
+
+        assert_eq!(notifications(&off), 0);
+        assert_eq!(notifications(&on), 1);
     }
 
     #[test]
     fn a_far_deadline_is_not_yet_warned_of() {
         let database = with_change(DEADLINE_WARNING_MS + 1);
 
-        enqueue_due(&database, 0).unwrap();
+        enqueue_due(&database, None, 0).unwrap();
 
         assert_eq!(notifications(&database), 0);
     }
@@ -199,39 +224,39 @@ mod tests {
         let (database, id) = with_stream(StreamState::Paused);
         database.add_gap(id, 140, 1, 2).unwrap();
 
-        assert_eq!(enqueue_due(&database, 0).unwrap(), 1);
+        assert_eq!(enqueue_due(&database, None, 0).unwrap(), 1);
     }
 
     #[test]
     fn a_first_sweep_is_due_at_once() {
         let database = Database::open_in_memory().unwrap();
 
-        assert_eq!(enqueue_due(&database, 1_000).unwrap(), 1);
+        assert_eq!(enqueue_due(&database, None, 1_000).unwrap(), 1);
     }
 
     #[test]
     fn a_sweep_is_not_due_again_within_a_day() {
         let database = Database::open_in_memory().unwrap();
-        enqueue_due(&database, 0).unwrap();
+        enqueue_due(&database, None, 0).unwrap();
 
-        assert_eq!(enqueue_due(&database, DAY_MS - 1).unwrap(), 0);
+        assert_eq!(enqueue_due(&database, None, DAY_MS - 1).unwrap(), 0);
     }
 
     #[test]
     fn a_sweep_is_due_a_day_later_once_the_last_has_finished() {
         let database = Database::open_in_memory().unwrap();
-        enqueue_due(&database, 0).unwrap();
+        enqueue_due(&database, None, 0).unwrap();
         let job = database.claim_job(JobClass::Cpu, 0).unwrap().unwrap();
         database.finish_job(job.id, Ok(()), 1).unwrap();
 
-        assert_eq!(enqueue_due(&database, DAY_MS).unwrap(), 1);
+        assert_eq!(enqueue_due(&database, None, DAY_MS).unwrap(), 1);
     }
 
     #[test]
     fn a_sweep_still_waiting_is_not_queued_twice() {
         let database = Database::open_in_memory().unwrap();
-        enqueue_due(&database, 0).unwrap();
+        enqueue_due(&database, None, 0).unwrap();
 
-        assert_eq!(enqueue_due(&database, DAY_MS).unwrap(), 0);
+        assert_eq!(enqueue_due(&database, None, DAY_MS).unwrap(), 0);
     }
 }
