@@ -115,7 +115,11 @@ pub async fn serve(config: &Config, policy: IpPolicy, limits: FetchLimits) -> an
     }
     let (stop, shutdown) = watch::channel(false);
     let jobs = tokio::spawn(runner.run(shutdown.clone()));
-    let schedule = tokio::spawn(run_scheduler(database.clone(), shutdown.clone()));
+    let schedule = tokio::spawn(run_scheduler(
+        database.clone(),
+        config.daily_summary,
+        shutdown.clone(),
+    ));
     let notices = config
         .webhook
         .clone()

@@ -131,7 +131,7 @@ from [roadmap.md](roadmap.md).
 | --- | --- | --- | --- |
 | FR-J1 | Persist jobs: backfill, analysis (hourly by default), diff, prefetch, candidate extraction, export, transfer. Survive restarts. | M | 5 |
 | FR-J2 | Stream job progress to the Web UI. | M | 5, 6 |
-| FR-J3 | Notify on change, on error, on recovery from error, on a lost gap, on service start and on DVR deadline (24 hours remaining by default) via webhook (ntfy, Slack-compatible, Mattermost), linking to the relevant screen. | M | 5 |
+| FR-J3 | Notify on change, on error, on recovery from error, on a lost gap, on service start and on DVR deadline (24 hours remaining by default) via webhook (ntfy, Slack-compatible, Mattermost), linking to the relevant screen. Once a day at a set time, if turned on, summarise each stream and the jobs that failed. | M | 5 |
 
 ### 4.6 Web UI
 

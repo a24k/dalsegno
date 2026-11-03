@@ -259,6 +259,18 @@ impl Database {
         )?)
     }
 
+    /// Counts the jobs of each kind that failed after `since`, by kind.
+    pub fn failed_jobs_since(&self, since: i64) -> Result<Vec<(String, u64)>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT kind, COUNT(*) FROM jobs WHERE state = 'failed' AND finished_at > ?1 \
+             GROUP BY kind ORDER BY kind",
+        )?;
+        let rows = statement.query_map([since], |row| {
+            Ok((row.get(0)?, row.get::<_, i64>(1)? as u64))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Returns when this job was last queued.
     pub fn last_job_at(&self, kind: &str, target: &str) -> Result<Option<i64>, StoreError> {
         Ok(self.connection.query_row(
@@ -283,6 +295,29 @@ mod tests {
             class,
             target: "{}".to_string(),
         }
+    }
+
+    fn finished(database: &Database, kind: &str, outcome: Result<(), &str>, at: i64) {
+        database.enqueue_job(&job(kind, JobClass::Cpu), 0).unwrap();
+        let claimed = database.claim_job(JobClass::Cpu, 0).unwrap().unwrap();
+        database.finish_job(claimed.id, outcome, at).unwrap();
+    }
+
+    #[test]
+    fn failures_are_counted_by_kind_after_a_time() {
+        let database = database();
+        finished(&database, "backfill", Err("offline"), 5);
+        finished(&database, "backfill", Err("offline"), 20);
+        finished(&database, "backfill", Err("offline"), 30);
+        finished(&database, "analysis", Err("short"), 25);
+        finished(&database, "sweep", Ok(()), 25);
+
+        let failed = database.failed_jobs_since(10).unwrap();
+
+        assert_eq!(
+            failed,
+            [("analysis".to_string(), 1), ("backfill".to_string(), 2)]
+        );
     }
 
     #[test]

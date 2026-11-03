@@ -63,6 +63,15 @@ impl Database {
         Ok(())
     }
 
+    /// Returns when a notification of this kind was last queued.
+    pub fn last_notification_at(&self, kind: &str) -> Result<Option<i64>, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT MAX(created_at) FROM notifications WHERE kind = ?1",
+            [kind],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Returns open changes whose deadline falls before `before`.
     pub fn changes_near_deadline(&self, before: i64) -> Result<Vec<DeadlineChange>, StoreError> {
         let mut statement = self.connection.prepare(
@@ -120,6 +129,20 @@ mod tests {
         database.note_notification_attempt(id).unwrap();
 
         assert_eq!(database.pending_notifications(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_last_of_a_kind_is_found() {
+        let database = with_one();
+        database
+            .enqueue_notification("summary", "summary:a", "{}", 3)
+            .unwrap();
+        database
+            .enqueue_notification("summary", "summary:b", "{}", 7)
+            .unwrap();
+
+        assert_eq!(database.last_notification_at("summary").unwrap(), Some(7));
+        assert_eq!(database.last_notification_at("gap").unwrap(), None);
     }
 
     #[test]

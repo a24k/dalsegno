@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+chrono.workspace = true
 dalsegno-app.workspace = true
 dalsegno-io.workspace = true
 dalsegno-store.workspace = true
