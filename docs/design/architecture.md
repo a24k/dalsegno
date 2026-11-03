@@ -89,6 +89,9 @@ sees it through a trait, so tests substitute a fake.
 - **Blocking work.** CPU work uses `spawn_blocking` and rayon so the follow loop
   stays responsive (NFR-5).
 - **Notifier.** Drains the `notifications` outbox with retry (D-25).
+- **Logs.** At info level the service logs each job's start and end with its duration, each
+  stream state change, each period found or changed, each gap opened, filled or lost, and each
+  finished backfill, so a healthy service can be told from a stalled one.
 - **Database.** WAL mode. One writer thread runs whole transactions sent over a channel,
   and readers use short-lived connections.
 - **Crash recovery.** On start, jobs in `running` return to `queued`. Every job is

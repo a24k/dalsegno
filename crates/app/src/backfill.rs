@@ -1,11 +1,17 @@
 //! Filling recorded gaps from the DVR, oldest first (FR-A6, FR-A11).
 
 use crate::error::AcquireError;
-use crate::fetch::{FetchRange, FetchReport, Fetcher, MAX_RANGE_FRAGMENTS, fetch_range, lock};
+use crate::fetch::{
+    FetchRange, FetchReport, Fetcher, Ledger, MAX_RANGE_FRAGMENTS, fetch_range, lock,
+};
+use crate::notify::GAP;
 use crate::probe::read_head;
+use crate::time::now_ms;
 use dalsegno_io::ytdlp::Resolver;
+use dalsegno_store::database::{Database, StoreError};
 use dalsegno_store::gaps::{Gap, GapStatus};
 use serde::Serialize;
+use serde_json::json;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -80,6 +86,14 @@ pub async fn backfill<R: Resolver>(
     for gap in gaps {
         fill(&fetcher, gap, &mut report, &mut done, progress).await?;
     }
+    tracing::info!(
+        stream = fetcher.ledger.stream_id,
+        itag = fetcher.ledger.itag,
+        fetched = report.fetched,
+        lost = report.lost,
+        failed = report.failed,
+        "backfill finished"
+    );
     Ok(report)
 }
 
@@ -102,7 +116,43 @@ pub(crate) fn record_missing<R>(
         .filter(|sq| !known.iter().any(|gap| (gap.0..=gap.1).contains(sq)));
     for (gap_first, gap_last) in ranges(missing) {
         database.add_gap(ledger.stream_id, ledger.itag, gap_first, gap_last)?;
+        tracing::info!(
+            stream = ledger.stream_id,
+            itag = ledger.itag,
+            first = gap_first,
+            last = gap_last,
+            "gap opened"
+        );
     }
+    Ok(())
+}
+
+/// Records fragments that left the DVR as a lost gap, with its notification (D-25).
+fn record_lost(
+    database: &Database,
+    ledger: &Ledger,
+    (first, last): (u64, u64),
+) -> Result<(), StoreError> {
+    database.atomically(|database| {
+        let id = database.add_gap(ledger.stream_id, ledger.itag, first, last)?;
+        database.set_gap_status(id, GapStatus::Lost)?;
+        let body = json!({
+            "stream": database.stream(ledger.stream_id)?.map(|row| row.stream.title),
+            "itag": ledger.itag,
+            "sq_first": first,
+            "sq_last": last,
+            "seconds": (last - first + 1) as f64 * ledger.fragment_len,
+        });
+        let subject = format!("gap:{id}:lost");
+        database.enqueue_notification(GAP, &subject, &body.to_string(), now_ms())
+    })?;
+    tracing::warn!(
+        stream = ledger.stream_id,
+        itag = ledger.itag,
+        first,
+        last,
+        "gap lost"
+    );
     Ok(())
 }
 
@@ -131,16 +181,28 @@ async fn fill<R: Resolver>(
     report.fetched += total.fetched;
     report.lost += total.lost.len() as u64;
     report.failed += total.failed.len() as u64;
-    let database = lock(&fetcher.ledger.database)?;
-    for (lost_first, lost_last) in ranges(total.lost.iter().copied()) {
-        let id = database.add_gap(gap.stream_id, gap.itag, lost_first, lost_last)?;
-        database.set_gap_status(id, GapStatus::Lost)?;
+    let ledger = &fetcher.ledger;
+    let database = lock(&ledger.database)?;
+    for lost in ranges(total.lost.iter().copied()) {
+        record_lost(&database, ledger, lost)?;
     }
+    let (stream, itag) = (gap.stream_id, gap.itag);
     match (total.failed.first(), total.failed.last()) {
-        (Some(first_failed), Some(last_failed)) => {
-            database.shrink_gap(gap.id, *first_failed, *last_failed)?;
+        (Some(first), Some(last)) => {
+            database.shrink_gap(gap.id, *first, *last)?;
+            tracing::info!(
+                stream,
+                itag,
+                first,
+                last,
+                "gap partly filled, the rest stays open"
+            );
         }
-        _ => database.set_gap_status(gap.id, GapStatus::Filled)?,
+        _ => {
+            database.set_gap_status(gap.id, GapStatus::Filled)?;
+            let (first, last, lost) = (gap.sq_first, gap.sq_last, total.lost.len());
+            tracing::info!(stream, itag, first, last, lost, "gap filled");
+        }
     }
     Ok(())
 }

@@ -260,6 +260,7 @@ impl Pass<'_> {
                     )?;
                     Ok::<_, AcquireError>(())
                 })?;
+                tracing::info!(stream = self.row.id, period, "period found");
                 Ok(MonitorReport {
                     period: Some(period),
                     ..MonitorReport::default()
@@ -355,6 +356,13 @@ impl Pass<'_> {
             database.enqueue_notification(CHANGE, &subject, &body, now)?;
             hold_cycle(database, row, new_version, closing.start, closing.period)
         })?;
+        tracing::info!(
+            stream = row.id,
+            change = change.id,
+            old = old.period,
+            new = closing.period,
+            "period changed"
+        );
         Ok(Some(change.id))
     }
 }

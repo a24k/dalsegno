@@ -104,8 +104,15 @@ pub async fn serve(config: &Config, policy: IpPolicy, limits: FetchLimits) -> an
         library,
     });
     let runner = Arc::new(JobRunner::new(database.clone(), service.clone()));
-    let recovered = runner.recover().map_err(anyhow::Error::msg)?;
-    tracing::info!(recovered, "service starting");
+    let requeued = runner.recover().map_err(anyhow::Error::msg)?;
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        requeued,
+        "service starting"
+    );
+    if let Err(error) = notifier::announce_start(&database, requeued) {
+        tracing::warn!(error, "the start was not announced");
+    }
     let (stop, shutdown) = watch::channel(false);
     let jobs = tokio::spawn(runner.run(shutdown.clone()));
     let schedule = tokio::spawn(run_scheduler(database.clone(), shutdown.clone()));

@@ -7,7 +7,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
@@ -24,7 +24,6 @@ pub trait JobHandler: Debug + Send + Sync + 'static {
     fn run(&self, job: JobRow) -> JobFuture;
 }
 
-/// Returns the time in epoch milliseconds.
 /// Stores how far a job has come. A failure only costs the display, so it is logged.
 pub(crate) fn record_progress(database: &SharedDatabase, id: i64, progress: Progress) {
     let stored = lock(database)
@@ -39,11 +38,7 @@ pub(crate) fn record_progress(database: &SharedDatabase, id: i64, progress: Prog
     }
 }
 
-pub(crate) fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis() as i64)
-}
+pub(crate) use dalsegno_app::time::now_ms;
 
 /// Takes jobs from the database and runs them.
 #[derive(Debug)]
@@ -108,7 +103,9 @@ impl JobRunner {
     }
 
     async fn run_one(&self, job: JobRow, shutdown: &mut watch::Receiver<bool>) {
-        let id = job.id;
+        let (id, kind) = (job.id, job.job.kind.clone());
+        tracing::info!(id, kind, "job started");
+        let started = Instant::now();
         let mut task = tokio::spawn(self.handler.run(job));
         let outcome = tokio::select! {
             finished = &mut task => finished,
@@ -118,8 +115,10 @@ impl JobRunner {
             }
         };
         let result = outcome.unwrap_or_else(|_| Err("the job stopped unexpectedly".to_string()));
-        if let Err(message) = &result {
-            tracing::warn!(id, message, "job failed");
+        let seconds = started.elapsed().as_secs_f64();
+        match &result {
+            Ok(()) => tracing::info!(id, kind, seconds, "job finished"),
+            Err(message) => tracing::warn!(id, kind, seconds, message, "job failed"),
         }
         let finished = lock(&self.database).ok().map(|database| {
             let outcome = result.as_ref().map(|_| ()).map_err(String::as_str);
