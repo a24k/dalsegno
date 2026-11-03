@@ -14,6 +14,7 @@ use dalsegno_app::fetch::FetchLimits;
 use dalsegno_app::offline::{self, DiffRequest};
 use dalsegno_app::remote::ApiClient;
 use serde::Serialize;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use text::{
     add_text, backfill_text, candidates_text, cut_text, diff_text, doctor_text, features_text,
@@ -359,11 +360,21 @@ fn parse_owner(text: &str) -> Result<(u32, u32), String> {
     parsed.ok_or_else(|| "expected uid:gid".to_string())
 }
 
+/// The service says what it does, so a stalled one can be told from a healthy one. Other
+/// commands print their own report and log only problems.
+fn log_level(command: Option<&Command>) -> LevelFilter {
+    match command {
+        Some(Command::Serve) => LevelFilter::INFO,
+        _ => LevelFilter::WARN,
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     tracing_subscriber::fmt()
-        .with_max_level(LevelFilter::WARN)
+        .with_max_level(log_level(cli.command.as_ref()))
+        .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .init();
     let Some(command) = cli.command else {
@@ -642,6 +653,15 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn only_the_service_logs_what_it_does() {
+        let level = |args: &[&str]| log_level(Cli::try_parse_from(args).unwrap().command.as_ref());
+
+        assert_eq!(level(&["dalsegno", "serve"]), LevelFilter::INFO);
+        assert_eq!(level(&["dalsegno", "doctor"]), LevelFilter::WARN);
+        assert_eq!(level(&["dalsegno"]), LevelFilter::WARN);
     }
 
     #[test]
