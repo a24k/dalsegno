@@ -124,7 +124,8 @@ Bootstrap settings come from `~/.config/dalsegno/config.toml`, or the file `DALS
 names, and from environment variables prefixed `DALSEGNO_`, which win: data and library paths,
 bind address (`127.0.0.1:8737` by default), cookie file, webhook URL and format (`slack`,
 `mattermost` or `ntfy`), public URL, daily summary time (`HH:MM` in Japan time, off when
-unset), Plex URL and
+unset; a time that cannot be read leaves it off, with a warning and a word in the start
+notification, rather than stopping the service), Plex URL and
 token. The work area sits under the data path. Operational settings will start there and can be
 overridden in the database:
 IP family policy, rate limits, retention, disk floor, analysis thresholds (D-24). Secrets

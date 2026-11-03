@@ -18,6 +18,9 @@ const CONFIG_ENV: &str = "DALSEGNO_CONFIG";
 const DEFAULT_FILE: &str = ".config/dalsegno/config.toml";
 /// How the time of the daily summary is written, in Japan time.
 const SUMMARY_TIME_FORMAT: &str = "%H:%M";
+/// What is said when the time of the daily summary cannot be read.
+const BAD_SUMMARY_TIME: &str =
+    "DALSEGNO_DAILY_SUMMARY is not a time such as 09:00, so the daily summary is off";
 
 /// Why settings could not be read.
 #[derive(Debug, thiserror::Error)]
@@ -75,10 +78,22 @@ pub struct Config {
     pub public_url: Option<String>,
     /// When the daily summary goes out, in Japan time. None turns it off.
     pub daily_summary: Option<NaiveTime>,
+    /// Optional settings that could not be read and were left off, in words. The service runs
+    /// without them rather than stopping the recording.
+    pub ignored: Vec<String>,
     /// Plex base URL.
     pub plex_url: Option<String>,
     /// Plex token.
     pub plex_token: Option<Redacted<String>>,
+}
+
+/// Reads a time such as `09:00`. Quotes around it are dropped, as a compose list item
+/// (`- KEY="09:00"`) passes them on.
+fn parse_summary_time(text: &str) -> Option<NaiveTime> {
+    let unquoted = text
+        .trim()
+        .trim_matches(|character| character == '"' || character == '\'');
+    NaiveTime::parse_from_str(unquoted.trim(), SUMMARY_TIME_FORMAT).ok()
 }
 
 fn read_file(path: &Path, is_required: bool) -> Result<FileSettings, ConfigError> {
@@ -126,9 +141,11 @@ impl Config {
             .ok_or(ConfigError::Invalid("DALSEGNO_WEBHOOK_FORMAT"))?;
         let daily_summary = read("DALSEGNO_DAILY_SUMMARY")
             .or(file.daily_summary)
-            .map(|text| NaiveTime::parse_from_str(&text, SUMMARY_TIME_FORMAT))
-            .transpose()
-            .map_err(|_| ConfigError::Invalid("DALSEGNO_DAILY_SUMMARY"))?;
+            .map(|text| parse_summary_time(&text));
+        let ignored = match daily_summary {
+            Some(None) => vec![BAD_SUMMARY_TIME.to_string()],
+            _ => Vec::new(),
+        };
         Ok(Self {
             data: data.ok_or(ConfigError::Missing("DALSEGNO_DATA"))?,
             library: read("DALSEGNO_LIBRARY").map(PathBuf::from).or(file.library),
@@ -139,7 +156,8 @@ impl Config {
             webhook: read("DALSEGNO_WEBHOOK").or(file.webhook).map(Redacted::new),
             webhook_format,
             public_url: read("DALSEGNO_PUBLIC_URL").or(file.public_url),
-            daily_summary,
+            daily_summary: daily_summary.flatten(),
+            ignored,
             plex_url: read("DALSEGNO_PLEX_URL").or(file.plex_url),
             plex_token: read("DALSEGNO_PLEX_TOKEN")
                 .or(file.plex_token)
@@ -260,17 +278,26 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_summary_time_is_refused() {
-        let error = Config::merge(
+    fn quotes_around_the_summary_time_are_dropped() {
+        let environment =
+            |name: &str| (name == "DALSEGNO_DAILY_SUMMARY").then(|| " \"06:00\" ".to_string());
+
+        let config = Config::merge(file("data = \"/d\""), environment).unwrap();
+
+        assert_eq!(config.daily_summary, NaiveTime::from_hms_opt(6, 0, 0));
+        assert!(config.ignored.is_empty());
+    }
+
+    #[test]
+    fn a_bad_summary_time_turns_the_summary_off_without_stopping() {
+        let config = Config::merge(
             file("data = \"/d\"\ndaily_summary = \"9 am\""),
             no_environment,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(matches!(
-            error,
-            ConfigError::Invalid("DALSEGNO_DAILY_SUMMARY")
-        ));
+        assert_eq!(config.daily_summary, None);
+        assert_eq!(config.ignored, [BAD_SUMMARY_TIME]);
     }
 
     #[test]

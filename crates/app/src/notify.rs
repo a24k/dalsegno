@@ -124,11 +124,21 @@ fn stream_event(subject: &str) -> &'static str {
 
 fn describe_start(body: &Value) -> (String, String) {
     let requeued = number(body, "requeued");
-    let details = if requeued == 0.0 {
+    let jobs = if requeued == 0.0 {
         "No interrupted jobs to requeue.".to_string()
     } else {
         format!("Requeued {}.", count(requeued, "interrupted job"))
     };
+    let ignored = body["ignored"].as_array().map_or(&[][..], Vec::as_slice);
+    let problems = ignored
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|problem| format!("{}.", capitalised(problem)));
+    let details = [jobs]
+        .into_iter()
+        .chain(problems)
+        .collect::<Vec<_>>()
+        .join("\n");
     (
         format!("Service started: dalsegno {}", text(body, "version")),
         details,
@@ -414,6 +424,22 @@ mod tests {
         assert_eq!(message.title, "Service started: dalsegno 0.5.0");
         assert_eq!(message.text, "Requeued 2 interrupted jobs.");
         assert_eq!(message.link.unwrap().label, "Open the jobs");
+    }
+
+    #[test]
+    fn a_start_says_which_settings_it_left_off() {
+        let body = json!({
+            "version": "0.5.0",
+            "requeued": 0,
+            "ignored": ["the daily summary is off"],
+        });
+
+        let message = render(&notification(SERVICE, "service:started:1", body), None, NOW);
+
+        assert_eq!(
+            message.text,
+            "No interrupted jobs to requeue.\nThe daily summary is off."
+        );
     }
 
     #[test]
