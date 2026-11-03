@@ -3,6 +3,7 @@
 use crate::acquisition::Library;
 use crate::error::AcquireError;
 use crate::fetch::lock;
+use crate::time::now_ms;
 use dalsegno_core::export::check_output_dir;
 use dalsegno_core::redact::Redacted;
 use dalsegno_io::plex::Plex;
@@ -11,7 +12,7 @@ use dalsegno_store::clips::{ClipRow, PlexStatus};
 use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::task::spawn_blocking;
 
 /// Polls while Plex scans, for about two minutes.
@@ -53,12 +54,6 @@ pub struct PublishReport {
     pub already_there: bool,
     /// Plex's answer, if it was asked: `confirmed` or `failed`.
     pub plex: Option<String>,
-}
-
-fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis() as i64)
 }
 
 /// Returns the finished folder in the work area, once a retry has not removed it.

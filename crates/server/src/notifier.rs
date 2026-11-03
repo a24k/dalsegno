@@ -5,9 +5,10 @@
 
 use crate::runner::now_ms;
 use dalsegno_app::fetch::{SharedDatabase, lock};
-use dalsegno_app::notify::render;
+use dalsegno_app::notify::{SERVICE, render};
 use dalsegno_io::webhook::Webhook;
 use dalsegno_store::notifications::Notification;
+use serde_json::json;
 use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
@@ -21,6 +22,21 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// The longest wait after failures.
 const MAX_WAIT: Duration = Duration::from_secs(1800);
 const BATCH: u32 = 20;
+
+/// Announces that the service started, with how many interrupted jobs it put back.
+pub fn announce_start(database: &SharedDatabase, requeued: usize) -> Result<(), String> {
+    let now = now_ms();
+    let body = json!({ "version": env!("CARGO_PKG_VERSION"), "requeued": requeued });
+    let database = lock(database).map_err(|error| error.to_string())?;
+    database
+        .enqueue_notification(
+            SERVICE,
+            &format!("service:started:{now}"),
+            &body.to_string(),
+            now,
+        )
+        .map_err(|error| error.to_string())
+}
 
 /// What sending gives back, with a message safe to log.
 pub type SendFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
@@ -195,6 +211,24 @@ mod tests {
 
         assert_eq!(pending(&database), 2);
         assert!(sender.sent.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_start_is_announced_with_the_jobs_it_requeued() {
+        let database = database(&[]);
+        let sender = Arc::new(Recording::default());
+
+        announce_start(&database, 3).unwrap();
+        notifier(&database, &sender).drain().await.unwrap();
+
+        let sent = sender.sent.lock().unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(
+            sent[..],
+            [format!(
+                "dalsegno {version} started, and requeued 3 interrupted jobs."
+            )]
+        );
     }
 
     #[tokio::test]

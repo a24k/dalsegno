@@ -9,6 +9,10 @@ pub const CHANGE: &str = "change";
 pub const DEADLINE: &str = "deadline";
 /// The kind of a notification about a stream.
 pub const STREAM: &str = "stream";
+/// The kind of a notification about a hole that cannot be filled.
+pub const GAP: &str = "gap";
+/// The kind of a notification about the service itself.
+pub const SERVICE: &str = "service";
 
 const HOUR_MS: f64 = 3_600_000.0;
 
@@ -32,6 +36,7 @@ fn link(notification: &Notification, public_url: Option<&str>) -> Option<String>
     let base = public_url?.trim_end_matches('/');
     Some(match change_id(&notification.subject) {
         Some(id) => format!("{base}/changes/{id}"),
+        None if notification.kind == SERVICE => format!("{base}/jobs"),
         None => format!("{base}/streams"),
     })
 }
@@ -64,6 +69,18 @@ pub fn render(notification: &Notification, public_url: Option<&str>, now: i64) -
             hours_left(&body, now),
         ),
         STREAM => format!("{}: {}", text(&body, "stream"), text(&body, "message")),
+        GAP => format!(
+            "{}: {:.0} s of track {} left the DVR before it was fetched, so the recording has a \
+             hole that cannot be filled.",
+            text(&body, "stream"),
+            number(&body, "seconds"),
+            number(&body, "itag"),
+        ),
+        SERVICE => format!(
+            "dalsegno {} started, and requeued {} interrupted jobs.",
+            text(&body, "version"),
+            number(&body, "requeued"),
+        ),
         other => format!("{other}: {}", notification.subject),
     };
     match link(notification, public_url) {
@@ -149,6 +166,33 @@ mod tests {
             "{text}"
         );
         assert!(text.ends_with("/streams"), "{text}");
+    }
+
+    #[test]
+    fn a_lost_gap_says_how_much_is_gone() {
+        let body = json!({ "stream": "Example", "itag": 140, "seconds": 25.0 });
+
+        let text = render(&notification(GAP, "gap:3:lost", body), None, NOW);
+
+        assert!(text.starts_with("Example: 25 s of track 140"), "{text}");
+        assert!(text.contains("cannot be filled"), "{text}");
+    }
+
+    #[test]
+    fn a_start_gives_the_version_and_links_to_the_jobs() {
+        let body = json!({ "version": "0.5.0", "requeued": 2 });
+
+        let text = render(
+            &notification(SERVICE, "service:started:1", body),
+            Some("https://dalsegno.example"),
+            NOW,
+        );
+
+        assert!(
+            text.starts_with("dalsegno 0.5.0 started, and requeued 2"),
+            "{text}"
+        );
+        assert!(text.ends_with("/jobs"), "{text}");
     }
 
     #[test]

@@ -142,6 +142,49 @@ async fn fragments_gone_from_the_dvr_are_recorded_and_not_requested_again() {
     assert_eq!(open_gaps(&harness), []);
 }
 
+fn notices(harness: &Harness) -> Vec<(String, String)> {
+    harness
+        .database
+        .lock()
+        .unwrap()
+        .pending_notifications(10)
+        .unwrap()
+        .into_iter()
+        .map(|notice| (notice.kind, notice.body))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_lost_fragment_is_notified_once() {
+    let harness = harness().await;
+    Mock::given(query_param("sq", "97"))
+        .respond_with(ResponseTemplate::new(404).insert_header("X-Head-Seqnum", "100"))
+        .mount(&harness.server)
+        .await;
+    serve_fragment(&harness.server, 98).await;
+    serve_fragment(&harness.server, 99).await;
+
+    run(&harness, HOURS).await.unwrap();
+    run(&harness, HOURS).await.unwrap();
+
+    let notices = notices(&harness);
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].0, "gap");
+    assert!(notices[0].1.contains("\"seconds\":5.0"), "{}", notices[0].1);
+}
+
+#[tokio::test]
+async fn a_filled_window_notifies_nothing() {
+    let harness = harness().await;
+    for sq in 97..=99 {
+        serve_fragment(&harness.server, sq).await;
+    }
+
+    run(&harness, HOURS).await.unwrap();
+
+    assert_eq!(notices(&harness), []);
+}
+
 #[tokio::test]
 async fn fragments_that_keep_failing_stay_open_for_the_next_run() {
     let harness = harness().await;

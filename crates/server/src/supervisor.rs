@@ -10,7 +10,7 @@ use dalsegno_app::notify::STREAM;
 use dalsegno_store::database::{Database, StoreError};
 use dalsegno_store::streams::{StreamRow, StreamState};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
@@ -35,7 +35,17 @@ const FOLLOWING_FAILED: &str = "following failed, and is being retried";
 const ORIGIN_REFUSED: &str =
     "the origin refused every address, which can mean a bot check, and is tried again in hours";
 
+const RECOVERED: &str = "recording again after an error";
+
 const ACTIVE: [StreamState; 2] = [StreamState::Backfilling, StreamState::Recording];
+const ALL: [StreamState; 6] = [
+    StreamState::Registered,
+    StreamState::Backfilling,
+    StreamState::Recording,
+    StreamState::Paused,
+    StreamState::Error,
+    StreamState::Ended,
+];
 
 /// What following a stream gives back, with a message safe to store and show.
 pub type FollowFuture = Pin<Box<dyn Future<Output = Result<FollowEnd, String>> + Send>>;
@@ -68,6 +78,10 @@ pub struct Supervisor {
     refused_base: Duration,
     running: HashMap<i64, Running>,
     retries: HashMap<i64, Retry>,
+    /// The state each stream had at the last look, so that a change is logged once.
+    seen: HashMap<i64, StreamState>,
+    /// Streams that were in `error` and have not recorded since.
+    recovering: HashSet<i64>,
 }
 
 fn delay_after(base: Duration, limit: Duration, failures: u32) -> Duration {
@@ -126,6 +140,8 @@ impl Supervisor {
             refused_base: REFUSED_BASE,
             running: HashMap::new(),
             retries: HashMap::new(),
+            seen: HashMap::new(),
+            recovering: HashSet::new(),
         }
     }
 
@@ -148,7 +164,9 @@ impl Supervisor {
 
     async fn look(&mut self) -> Result<(), String> {
         self.reap().await?;
+        self.observe()?;
         self.retry_failed()?;
+        self.observe()?;
         let active = {
             let database = lock(&self.database).map_err(|error| error.to_string())?;
             database
@@ -242,6 +260,54 @@ impl Supervisor {
             is_first,
         )
         .map_err(|error| error.to_string())
+    }
+
+    /// Logs each stream whose state changed since the last look, and announces a stream that
+    /// records again after an error. A state held for less than a look is not seen.
+    fn observe(&mut self) -> Result<(), String> {
+        let shared = Arc::clone(&self.database);
+        let database = lock(&shared).map_err(|error| error.to_string())?;
+        for state in ALL {
+            let rows = database
+                .streams_in_states(&[state])
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                let before = self.seen.insert(row.id, state);
+                if let Some(before) = before.filter(|before| *before != state) {
+                    let (from, to) = (before.as_str(), state.as_str());
+                    tracing::info!(stream = row.id, from, to, "stream state changed");
+                }
+                self.follow_recovery(&database, &row, state)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Only memory knows a stream is recovering, so a restart in the seconds between a retry
+    /// and the head goes unannounced.
+    fn follow_recovery(
+        &mut self,
+        database: &Database,
+        row: &StreamRow,
+        state: StreamState,
+    ) -> Result<(), StoreError> {
+        match state {
+            StreamState::Error => {
+                self.recovering.insert(row.id);
+            }
+            StreamState::Recording if self.recovering.remove(&row.id) => {
+                tracing::info!(stream = row.id, "stream recovered");
+                let subject = format!("stream:{}:recovered:{}", row.id, now_ms());
+                let body = json!({ "stream": row.stream.title, "message": RECOVERED });
+                database.enqueue_notification(STREAM, &subject, &body.to_string(), now_ms())?;
+            }
+            StreamState::Backfilling | StreamState::Recording => {}
+            StreamState::Registered | StreamState::Paused | StreamState::Ended => {
+                self.recovering.remove(&row.id);
+            }
+        }
+        Ok(())
     }
 
     /// Gives failed streams another go when their wait is over. A stream that failed before a
@@ -342,6 +408,8 @@ mod tests {
             refused_base: Duration::from_millis(5),
             running: HashMap::new(),
             retries: HashMap::new(),
+            seen: HashMap::new(),
+            recovering: HashSet::new(),
         }
     }
 
@@ -543,6 +611,81 @@ mod tests {
         record_end(&lock(&database).unwrap(), id, StreamState::Error, "offline").unwrap();
 
         assert_eq!(state(&database, id).0, StreamState::Paused);
+    }
+
+    fn subjects(database: &SharedDatabase) -> Vec<String> {
+        let pending = lock(database).unwrap().pending_notifications(10).unwrap();
+        pending.into_iter().map(|notice| notice.subject).collect()
+    }
+
+    fn set(database: &SharedDatabase, id: i64, state: StreamState) {
+        lock(database)
+            .unwrap()
+            .set_stream_state(id, state, None)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_records_again_after_an_error_is_announced_once() {
+        let (database, id) = database_with_stream(StreamState::Recording);
+        let follower = Arc::new(Scripted::default());
+        follower
+            .ends
+            .lock()
+            .unwrap()
+            .push(Err("offline".to_string()));
+        let (stop, shutdown) = watch::channel(false);
+        let running = tokio::spawn(supervisor(&database, &follower).run(shutdown));
+        until(|| follower.started.load(Ordering::SeqCst) == 2).await;
+
+        set(&database, id, StreamState::Recording);
+        until(|| subjects(&database).len() == 2).await;
+        sleep(Duration::from_millis(30)).await;
+        stop.send(true).unwrap();
+        running.await.unwrap();
+
+        let subjects = subjects(&database);
+        assert!(
+            subjects[0].starts_with(&format!("stream:{id}:error:")),
+            "{subjects:?}"
+        );
+        assert!(
+            subjects[1].starts_with(&format!("stream:{id}:recovered:")),
+            "{subjects:?}"
+        );
+        let body = lock(&database).unwrap().pending_notifications(10).unwrap()[1]
+            .body
+            .clone();
+        assert!(body.contains("Example TV"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_failed_before_a_restart_is_announced_when_it_records() {
+        let (database, id) = database_with_stream(StreamState::Error);
+        let follower = Arc::new(Scripted::default());
+        let (stop, shutdown) = watch::channel(false);
+        let running = tokio::spawn(supervisor(&database, &follower).run(shutdown));
+        until(|| follower.started.load(Ordering::SeqCst) == 1).await;
+
+        set(&database, id, StreamState::Recording);
+        until(|| subjects(&database).len() == 1).await;
+        stop.send(true).unwrap();
+        running.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stream_paused_after_an_error_is_not_announced_when_it_records() {
+        let (database, id) = database_with_stream(StreamState::Error);
+        let follower = Arc::new(Scripted::default());
+        let mut watched = supervisor(&database, &follower);
+        watched.observe().unwrap();
+
+        set(&database, id, StreamState::Paused);
+        watched.observe().unwrap();
+        set(&database, id, StreamState::Recording);
+        watched.observe().unwrap();
+
+        assert_eq!(subjects(&database), Vec::<String>::new());
     }
 
     #[test]
