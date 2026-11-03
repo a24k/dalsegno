@@ -23,10 +23,19 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_WAIT: Duration = Duration::from_secs(1800);
 const BATCH: u32 = 20;
 
-/// Announces that the service started, with how many interrupted jobs it put back.
-pub fn announce_start(database: &SharedDatabase, requeued: usize) -> Result<(), String> {
+/// Announces that the service started, with how many interrupted jobs it put back and the
+/// settings it left off.
+pub fn announce_start(
+    database: &SharedDatabase,
+    requeued: usize,
+    ignored: &[String],
+) -> Result<(), String> {
     let now = now_ms();
-    let body = json!({ "version": env!("CARGO_PKG_VERSION"), "requeued": requeued });
+    let body = json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "requeued": requeued,
+        "ignored": ignored,
+    });
     let database = lock(database).map_err(|error| error.to_string())?;
     database
         .enqueue_notification(
@@ -216,7 +225,7 @@ mod tests {
         let database = database(&[]);
         let sender = Arc::new(Recording::default());
 
-        announce_start(&database, 3).unwrap();
+        announce_start(&database, 3, &[]).unwrap();
         notifier(&database, &sender).drain().await.unwrap();
 
         let sent = sender.sent.lock().unwrap();

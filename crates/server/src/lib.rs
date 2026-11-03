@@ -110,7 +110,10 @@ pub async fn serve(config: &Config, policy: IpPolicy, limits: FetchLimits) -> an
         requeued,
         "service starting"
     );
-    if let Err(error) = notifier::announce_start(&database, requeued) {
+    for problem in &config.ignored {
+        tracing::warn!(problem, "setting ignored");
+    }
+    if let Err(error) = notifier::announce_start(&database, requeued, &config.ignored) {
         tracing::warn!(error, "the start was not announced");
     }
     let (stop, shutdown) = watch::channel(false);
