@@ -7,6 +7,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
 dalsegno-core.workspace = true
 dalsegno-io.workspace = true
 dalsegno-store.workspace = true
