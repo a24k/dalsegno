@@ -190,6 +190,8 @@ fn stream_json(stream: &StreamStatus) -> Value {
         "period": stream.period,
         "follow_sq": stream.follow_sq,
         "last_fetch_at": stream.last_fetch_at,
+        "open_fragments": stream.open_fragments,
+        "lost_fragments": stream.lost_fragments,
     })
 }
 
@@ -501,6 +503,8 @@ mod tests {
         assert_eq!(body["success"], true);
         assert_eq!(body["error"], Value::Null);
         assert_eq!(body["data"][0]["state"], "registered");
+        assert_eq!(body["data"][0]["open_fragments"], 0);
+        assert_eq!(body["data"][0]["lost_fragments"], 0);
         assert_eq!(body["meta"]["total"], 1);
         assert_eq!(body["meta"]["limit"], DEFAULT_LIMIT);
     }
