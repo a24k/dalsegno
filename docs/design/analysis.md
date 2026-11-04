@@ -104,6 +104,7 @@ stateDiagram-v2
   [*] --> provisional: signal
   provisional --> provisional: more regions, or further change
   provisional --> confirmed: one stable cycle seen
+  provisional --> dismissed: that cycle is the old version
   confirmed --> resolved: exports done
   confirmed --> dismissed: operator
   provisional --> dismissed: operator
@@ -117,8 +118,11 @@ past a cycle's ends and would find the new audio there.
 
 Provisional creation enqueues prefetch, sets the DVR deadline and notifies. Confirmation
 creates the version, holds its audio and features, runs diff and self-checks, and notifies
-once more (D-08). Each state change commits together with its outbox row, so a crash can
-neither lose nor duplicate an alert (D-25).
+once more (D-08). When that cycle is the old version again (every region `existing` and in
+order, every check passed, the period within the check tolerance), the signal was a passing
+glitch: the change is dismissed with its comparison kept, no version is made, the period stays,
+and the notification says there is nothing to export. Each state change commits together with
+its outbox row, so a crash can neither lose nor duplicate an alert (D-25).
 
 ## Version comparison
 

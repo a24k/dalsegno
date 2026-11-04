@@ -371,7 +371,7 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "dalsegno"
-version = "0.5.0-rc.11"
+version = "0.5.0-rc.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "dalsegno-app"
-version = "0.5.0-rc.11"
+version = "0.5.0-rc.12"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "dalsegno-core"
-version = "0.5.0-rc.11"
+version = "0.5.0-rc.12"
 dependencies = [
  "dalsegno-test-support",
  "rayon",
@@ -422,7 +422,7 @@ dependencies = [
 
 [[package]]
 name = "dalsegno-io"
-version = "0.5.0-rc.11"
+version = "0.5.0-rc.12"
 dependencies = [
  "dalsegno-core",
  "reqwest",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "dalsegno-server"
-version = "0.5.0-rc.11"
+version = "0.5.0-rc.12"
 dependencies = [
  "anyhow",
  "axum",
@@ -454,7 +454,7 @@ dependencies = [
 
 [[package]]
 name = "dalsegno-store"
-version = "0.5.0-rc.11"
+version = "0.5.0-rc.12"
 dependencies = [
  "dalsegno-core",
  "rusqlite",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "dalsegno-test-support"
-version = "0.5.0-rc.11"
+version = "0.5.0-rc.12"
 
 [[package]]
 name = "deadpool"

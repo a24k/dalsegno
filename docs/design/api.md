@@ -113,8 +113,9 @@ mrkdwn and `ntfy` gets plain text. `mattermost` sends a short message saying it 
 dalsegno and which stream it is about, and an attachment with what happened as its title
 (linked to the screen), the details, and the version; its colour is red for a lost gap or a
 stream error, amber for a change, a deadline, an end or a summary with losses or failures, and
-green otherwise. When `daily_summary` is set, a
-summary goes out once a day at that time, or at start when the service starts later that day, with a line per stream that has not ended (state,
+green otherwise, as for a dismissed change. A change first seen as audio that matches nothing
+has no length yet, and says so instead of a number. When `daily_summary` is set, a summary goes
+out once a day at that time, or at start when the service starts later that day, with a line per stream that has not ended (state,
 period, fragments to fill and lost) and the jobs that failed since the last one. An
 illustrative example, which is not a test oracle:
 
