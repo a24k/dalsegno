@@ -8,14 +8,14 @@ use crate::fetch::{SharedDatabase, lock};
 use crate::lifecycle::{PrefetchTarget, ensure_program};
 use crate::notify::CHANGE;
 use dalsegno_core::analysis::{
-    Diff, DiffConfig, LagRun, PeriodConfig, PeriodEstimate, Prepared, Region, RunKind, Series,
-    Signal, TrackConfig, VersionCycle, compare, detect_signals, estimate_period, lag_bounds,
-    summarise, track,
+    Diff, DiffConfig, LagRun, PeriodConfig, PeriodEstimate, Prepared, Region, RegionClass, RunKind,
+    Series, Signal, TrackConfig, VersionCycle, compare, detect_signals, estimate_period,
+    lag_bounds, summarise, track,
 };
 use dalsegno_core::features::BIN_RATE;
 use dalsegno_store::changes::{
-    AnalysisState, Confirmation, NewChange, NewRegion, NewVersion, OpenChange, StoredRun,
-    VersionRow,
+    AnalysisState, Confirmation, Dismissal, NewChange, NewRegion, NewVersion, OpenChange,
+    StoredRun, VersionRow,
 };
 use dalsegno_store::database::Database;
 use dalsegno_store::retention::{HoldOwner, NewHold};
@@ -48,6 +48,8 @@ pub struct MonitorReport {
     pub opened: Option<i64>,
     /// The change this pass confirmed.
     pub confirmed: Option<i64>,
+    /// The change this pass closed as no change.
+    pub dismissed: Option<i64>,
 }
 
 fn read_history(database: &Database, stream_id: i64) -> Result<Option<Series>, AcquireError> {
@@ -235,10 +237,16 @@ impl Pass<'_> {
         };
         let change = with_later_signal(&database, change, seen)?;
         drop(database);
-        let confirmed = self.try_confirm(program, period, change, version)?;
-        Ok(MonitorReport {
-            confirmed,
-            ..report
+        Ok(match self.try_close(program, period, change, version)? {
+            Some(Closed::Confirmed(id)) => MonitorReport {
+                confirmed: Some(id),
+                ..report
+            },
+            Some(Closed::Dismissed(id)) => MonitorReport {
+                dismissed: Some(id),
+                ..report
+            },
+            None => report,
         })
     }
 
@@ -296,7 +304,7 @@ impl Pass<'_> {
         let body = to_json(&json!({
             "stream": self.row.stream.title,
             "started_at": seen.first,
-            "delta": change.delta,
+            "delta": seen.delta,
             "dvr_deadline_at": change.dvr_deadline_at,
         }))?;
         database.atomically(|database| {
@@ -308,21 +316,59 @@ impl Pass<'_> {
         })
     }
 
-    /// Confirms a change once a whole cycle has passed without another signal. Its version,
-    /// comparison and notification are written together.
-    fn try_confirm(
+    /// Closes a change once a whole cycle has passed without another signal: dismissed when
+    /// that cycle is the old version, confirmed otherwise.
+    fn try_close(
         &self,
         program: i64,
         period: f64,
         change: OpenChange,
         version: VersionRow,
-    ) -> Result<Option<i64>, AcquireError> {
+    ) -> Result<Option<Closed>, AcquireError> {
         let old = lock(self.database)?
             .version(change.old_version_id)?
             .unwrap_or(version);
         let Some(closing) = compare_cycles(self.data, period, &change, &old) else {
             return Ok(None);
         };
+        if is_no_change(&closing, old.period) {
+            return self.dismiss(change, &closing).map(Some);
+        }
+        self.confirm(program, change, old, closing)
+            .map(|id| Some(Closed::Confirmed(id)))
+    }
+
+    /// Closes a change whose closing cycle is the old version, keeping the version and period.
+    fn dismiss(&self, change: OpenChange, closing: &Closing) -> Result<Closed, AcquireError> {
+        let dismissal = Dismissal {
+            change_id: change.id,
+            checks: to_json(&closing.diff.checks)?,
+            regions: stored_regions(&closing.diff)?,
+        };
+        let body = to_json(&json!({ "stream": self.row.stream.title }))?;
+        let now = self.now;
+        lock(self.database)?.atomically(|database| {
+            database.dismiss_change(&dismissal)?;
+            let subject = format!("change:{}:dismissed", change.id);
+            database.enqueue_notification(CHANGE, &subject, &body, now)?;
+            Ok::<_, AcquireError>(())
+        })?;
+        tracing::info!(
+            stream = self.row.id,
+            change = change.id,
+            "change dismissed, as a whole cycle matched the old version"
+        );
+        Ok(Closed::Dismissed(change.id))
+    }
+
+    /// Confirms a change. Its version, comparison and notification are written together.
+    fn confirm(
+        &self,
+        program: i64,
+        change: OpenChange,
+        old: VersionRow,
+        closing: Closing,
+    ) -> Result<i64, AcquireError> {
         let regions = stored_regions(&closing.diff)?;
         let checks = to_json(&closing.diff.checks)?;
         let boundaries = to_json(&closing.diff.video_boundaries)?;
@@ -363,7 +409,7 @@ impl Pass<'_> {
             new = closing.period,
             "period changed"
         );
-        Ok(Some(change.id))
+        Ok(change.id)
     }
 }
 
@@ -447,6 +493,26 @@ struct Closing {
     period: f64,
     start: f64,
     diff: Diff,
+}
+
+/// How a change was closed.
+enum Closed {
+    Confirmed(i64),
+    Dismissed(i64),
+}
+
+/// Whether the closing cycle is the old version again: every region found in it, in its order,
+/// every check passed, and the period moved by no more than measurement allows.
+fn is_no_change(closing: &Closing, old_period: f64) -> bool {
+    let diff = &closing.diff;
+    let is_all_existing = !diff.regions.is_empty()
+        && diff
+            .regions
+            .iter()
+            .all(|region| region.class == RegionClass::Existing && !region.moved);
+    let is_checked = diff.checks.iter().all(|check| check.passed);
+    let tolerance = DiffConfig::default().check_tolerance;
+    is_all_existing && is_checked && (closing.period - old_period).abs() <= tolerance
 }
 
 fn compare_cycles(
@@ -710,6 +776,46 @@ mod tests {
         let current = database.current_version(fixture.program).unwrap().unwrap();
         assert!((current.period - 3_500.0).abs() < 1.0, "{current:?}");
         assert_eq!(database.open_change(fixture.program).unwrap(), None);
+    }
+
+    /// A cycle with a stretch that matches nothing, as a passing glitch of the origin.
+    fn glitched(cycle: &[f32], seed: u64) -> Vec<f32> {
+        [
+            &cycle[..PERIOD / 2],
+            &noise(seed, 3_000),
+            &cycle[PERIOD / 2 + 3_000..],
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn a_change_whose_next_cycle_is_the_old_version_is_dismissed() {
+        let mut fixture = Fixture::new();
+        let cycle = noise(12, PERIOD);
+        fixture.store(&[&cycle[..], &cycle, &cycle].concat());
+        fixture.pass();
+        fixture.store(&glitched(&cycle, 13));
+        let opened = fixture.pass().opened.expect("a change");
+        fixture.store(&[&cycle[..], &cycle].concat());
+
+        let report = fixture.pass();
+
+        assert_eq!(
+            (report.confirmed, report.dismissed),
+            (None, Some(opened)),
+            "{report:?}"
+        );
+        assert_eq!(
+            fixture.count("SELECT COUNT(*) FROM changes WHERE state = 'dismissed'"),
+            1
+        );
+        assert_eq!(fixture.count("SELECT COUNT(*) FROM versions"), 1);
+        assert_eq!(
+            fixture.count(
+                "SELECT COUNT(*) FROM notifications WHERE subject LIKE 'change:%:dismissed'"
+            ),
+            1
+        );
     }
 
     #[test]

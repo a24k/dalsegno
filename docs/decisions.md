@@ -94,7 +94,9 @@ hours apart in the loop.
 triggers prefetch and the first notification. When one full cycle has been seen
 it becomes `confirmed`, the self-checks run, and a second notification reports the
 result. The DVR window of 120 hours against cycles of about 12 hours makes the wait
-safe. If a further change arrives first, it extends the open change.
+safe. If a further change arrives first, it extends the open change. If the full cycle turns
+out to be the old version, the change is dismissed instead, and the second notification says
+there is nothing to export.
 
 ### D-09 Unstable periods are modelled, not forced into a version
 

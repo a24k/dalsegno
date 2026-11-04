@@ -97,6 +97,17 @@ pub struct Confirmation {
     pub regions: Vec<NewRegion>,
 }
 
+/// What closes a change that turned out to be no change.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Dismissal {
+    /// Row ID of the change.
+    pub change_id: i64,
+    /// JSON array of self-checks.
+    pub checks: String,
+    /// The comparison.
+    pub regions: Vec<NewRegion>,
+}
+
 /// A stretch of the lag, with its kind as stored.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StoredRun {
@@ -337,12 +348,26 @@ impl Database {
                 confirmation.boundaries,
             ],
         )?;
-        for region in &confirmation.regions {
+        self.insert_regions(confirmation.change_id, &confirmation.regions)
+    }
+
+    /// Closes a change whose comparison found nothing new, keeping that comparison as the reason.
+    pub fn dismiss_change(&self, dismissal: &Dismissal) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE changes SET state = 'dismissed', checks = ?2 \
+             WHERE id = ?1 AND state = 'provisional'",
+            params![dismissal.change_id, dismissal.checks],
+        )?;
+        self.insert_regions(dismissal.change_id, &dismissal.regions)
+    }
+
+    fn insert_regions(&self, change_id: i64, regions: &[NewRegion]) -> Result<(), StoreError> {
+        for region in regions {
             self.connection.execute(
                 "INSERT INTO change_regions (change_id, class, start_time, end_time, \
                  match_version_id, match_start_time) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
-                    confirmation.change_id,
+                    change_id,
                     region.class,
                     region.start,
                     region.end,
@@ -496,6 +521,40 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM change_regions", [], |row| row.get(0))
             .unwrap();
         assert_eq!(regions, 1);
+    }
+
+    #[test]
+    fn a_dismissed_change_is_closed_without_a_new_version() {
+        let (database, stream, program) = database();
+        let old = database.insert_version(&version(stream, program)).unwrap();
+        let id = database
+            .insert_change(&change(stream, program, old))
+            .unwrap();
+
+        database
+            .dismiss_change(&Dismissal {
+                change_id: id,
+                checks: "[]".to_string(),
+                regions: vec![NewRegion {
+                    class: "existing".to_string(),
+                    start: 1.0,
+                    end: 2.0,
+                    match_version: Some(old),
+                    match_start: Some(0.5),
+                }],
+            })
+            .unwrap();
+
+        assert_eq!(database.open_change(program).unwrap(), None);
+        let (state, new_version): (String, Option<i64>) = database
+            .connection()
+            .query_row(
+                "SELECT state, new_version_id FROM changes WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((state.as_str(), new_version), ("dismissed", None));
     }
 
     #[test]

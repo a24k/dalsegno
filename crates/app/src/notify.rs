@@ -89,7 +89,14 @@ fn link(notification: &Notification, public_url: Option<&str>) -> Option<Link> {
     })
 }
 
-fn describe_change(notification: &Notification, body: &Value, now: i64) -> (String, String) {
+fn describe_change(notification: &Notification, body: &Value, now: i64) -> (String, String, Tone) {
+    if notification.subject.ends_with(":dismissed") {
+        return (
+            "Change dismissed".to_string(),
+            "A whole cycle matched the old version, so there is nothing to export.".to_string(),
+            Tone::Good,
+        );
+    }
     if notification.subject.ends_with(":confirmed") {
         return (
             "Change confirmed".to_string(),
@@ -99,15 +106,21 @@ fn describe_change(notification: &Notification, body: &Value, now: i64) -> (Stri
                 number(body, "new_period"),
                 count(number(body, "regions"), "region"),
             ),
+            Tone::Notice,
         );
     }
+    // The first signal can be audio that matches nothing, which has no length yet.
+    let so_far = body["delta"].as_f64().map_or_else(
+        || "Its length is not measured yet.".to_string(),
+        |delta| format!("{delta:+.1} s so far."),
+    );
     (
         "Change seen".to_string(),
         format!(
-            "{:+.1} s so far. Export the old version{} before it leaves the DVR.",
-            number(body, "delta"),
+            "{so_far} Export the old version{} before it leaves the DVR.",
             by_deadline(body, now),
         ),
+        Tone::Notice,
     )
 }
 
@@ -196,11 +209,10 @@ pub fn render(notification: &Notification, public_url: Option<&str>, now: i64) -
     let body: Value = serde_json::from_str(&notification.body).unwrap_or(Value::Null);
     let stream = Some(text(&body, "stream").to_string());
     let ((event, details), subject, tone) = match notification.kind.as_str() {
-        CHANGE => (
-            describe_change(notification, &body, now),
-            stream,
-            Tone::Notice,
-        ),
+        CHANGE => {
+            let (event, details, tone) = describe_change(notification, &body, now);
+            ((event, details), stream, tone)
+        }
         DEADLINE => (
             (
                 "DVR deadline".to_string(),
@@ -347,6 +359,40 @@ mod tests {
         assert_eq!(
             message.text,
             "The period went from 100.0 s to 150.5 s, with 1 region compared."
+        );
+    }
+
+    #[test]
+    fn a_change_with_no_length_yet_says_so() {
+        let body = json!({ "stream": "Example TV", "delta": null, "dvr_deadline_at": DEADLINE_MS });
+
+        let message = render(
+            &notification(CHANGE, "change:7:provisional", body),
+            None,
+            NOW,
+        );
+
+        assert!(
+            message
+                .text
+                .starts_with("Its length is not measured yet. Export"),
+            "{}",
+            message.text
+        );
+    }
+
+    #[test]
+    fn a_dismissed_change_is_good_news() {
+        let body = json!({ "stream": "Example TV" });
+
+        let message = render(&notification(CHANGE, "change:7:dismissed", body), None, NOW);
+
+        assert_eq!(message.title(), "Change dismissed: Example TV");
+        assert_eq!(message.tone, Tone::Good);
+        assert!(
+            message.text.contains("nothing to export"),
+            "{}",
+            message.text
         );
     }
 
