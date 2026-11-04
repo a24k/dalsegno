@@ -46,6 +46,8 @@ pub fn classify(sq: u64, facts: ResponseFacts) -> Outcome {
         200 if facts.body_len == 0 => Outcome::Empty,
         200 if facts.sequence_num.is_some_and(|served| served != sq) => Outcome::Backoff,
         200 => Outcome::Success,
+        // The origin sometimes answers this at the head for a fragment it has not made yet.
+        204 => Outcome::NotYet,
         403 => Outcome::RefreshUrl,
         404 => match facts.head_seqnum {
             Some(head) if sq > head => Outcome::NotYet,
@@ -140,6 +142,11 @@ mod tests {
     }
 
     #[test]
+    fn no_content_is_not_yet() {
+        assert_eq!(classify(10, facts(204, 0, None)), Outcome::NotYet);
+    }
+
+    #[test]
     fn not_found_behind_head_is_lost() {
         assert_eq!(classify(5, facts(404, 0, Some(9))), Outcome::Lost);
         assert_eq!(classify(9, facts(404, 0, Some(9))), Outcome::Lost);
@@ -160,7 +167,7 @@ mod tests {
     #[test]
     fn other_statuses_are_unexpected() {
         assert_eq!(classify(5, facts(410, 0, None)), Outcome::Unexpected(410));
-        assert_eq!(classify(5, facts(204, 0, None)), Outcome::Unexpected(204));
+        assert_eq!(classify(5, facts(301, 0, None)), Outcome::Unexpected(301));
     }
 
     #[test]

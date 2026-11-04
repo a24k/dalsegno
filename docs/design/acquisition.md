@@ -51,6 +51,7 @@ Response classification, applied in one pure function so it can be unit tested:
 | 200 empty | `Retryable`, counted towards the family failure. |
 | 403 | `RefreshUrl`. Repeat after refresh: switch family. Repeat after switch: `error`. |
 | 404 past head | `NotYet`, resynchronise from `X-Head-Seqnum`. |
+| 204 | `NotYet`, as the origin sometimes answers so at the head for a fragment not yet made. |
 | 404 older than the DVR | `Lost`, recorded as a gap. |
 | 429, 503, 5xx | `Backoff`, exponential with jitter. |
 
