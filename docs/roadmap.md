@@ -75,6 +75,8 @@ Today's manual process is fully replaced.
 `serve`, stream supervisors, job runner, rate limiter, prefetch, change lifecycle,
 notification outbox, API, Docker image, CLI switched to the API.
 
+Results are in [reference/m5-verification.md](reference/m5-verification.md).
+
 **Exit:** several days running with no holes and no missed change, across a restart.
 
 ## M6 Web UI
