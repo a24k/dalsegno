@@ -457,8 +457,16 @@ async fn reject_unknown_host(
     next.run(request).await
 }
 
-async fn unknown_route() -> ApiError {
-    ApiError::not_found()
+/// Answers what no endpoint does: an unknown API path in the envelope, and any other page read
+/// with the Web UI.
+async fn unknown_route(method: Method, uri: Uri) -> Response {
+    let path = uri.path();
+    let is_api = path == "/api" || path.starts_with("/api/");
+    let is_read = matches!(method, Method::GET | Method::HEAD);
+    if is_api || !is_read {
+        return ApiError::not_found().into_response();
+    }
+    crate::ui::respond(path)
 }
 
 /// Builds the API.
@@ -604,6 +612,32 @@ mod tests {
         let fixture = fixture();
 
         let (status, body) = get_json(&fixture, "/api/v1/nothing").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn a_page_outside_the_api_is_left_to_the_web_ui() {
+        let fixture = fixture();
+        let request = Request::get("/changes/7").body(Body::empty()).unwrap();
+
+        let response = router(fixture.state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+
+        // The build may or may not be there, but either way the answer is not the API's.
+        let mime = response.headers().get(header::CONTENT_TYPE).unwrap();
+        assert!(!mime.to_str().unwrap().starts_with("application/json"));
+    }
+
+    #[tokio::test]
+    async fn a_write_outside_the_api_is_not_found() {
+        let fixture = fixture();
+        let request = Request::post("/changes/7").body(Body::empty()).unwrap();
+
+        let (status, body) = send(&fixture, request).await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"]["code"], "not_found");

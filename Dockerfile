@@ -1,11 +1,21 @@
 # One image: the service and the commands it runs (see docs/design/architecture.md).
 
+FROM node:26-trixie-slim AS web
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web ./
+RUN npm run build
+
 FROM rust:1.99-slim-trixie AS build
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends cmake g++ make
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates crates
+# The binary embeds the UI; a build without it would still compile, so check it is there.
+COPY --from=web /src/web/dist web/dist
+RUN test -f web/dist/index.html
 RUN cargo build --release --locked --package dalsegno
 
 FROM debian:trixie-slim AS tools

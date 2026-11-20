@@ -26,17 +26,63 @@ jobs:
         run: |
           docker run --rm dalsegno ffmpeg -hide_banner -h protocol=https \
             | grep -- '-max_redirects' > /dev/null
-      - name: The service starts and stops on its stop signal
+      - name: The service starts, serves the Web UI and stops on its stop signal
         run: |
-          docker run --detach --name dalsegno dalsegno
+          docker run --detach --name dalsegno --publish 127.0.0.1:8737:8737 dalsegno
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if docker exec dalsegno sh -c 'test -f /data/dalsegno.sqlite3'; then
+            if curl --fail --silent --output index.html http://127.0.0.1:8737/; then
               break
             fi
             sleep 1
           done
+          grep '<div id="app">' index.html > /dev/null
           docker stop --time 20 dalsegno
           test "$(docker inspect --format '{{.State.ExitCode}}' dalsegno)" = 0
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: cargo build --locked --package dalsegno
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - run: npm run e2e
+        working-directory: web
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: web/test-results/
+          retention-days: 7
 
   check:
     runs-on: ubuntu-latest

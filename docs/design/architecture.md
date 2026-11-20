@@ -58,7 +58,7 @@ algorithms testable on synthetic data and usable offline.
 | `server` | axum API, SSE, scheduler, job runner, stream supervisors, embedded UI | `app` |
 | `app` | Use cases, policies (IP family, retention), domain errors | `core`, `io`, `store` |
 | `io` | yt-dlp, HTTP fetcher, ffmpeg, Plex and webhook adapters | `core` |
-| `store` | SQLite access, migrations, repositories | `core` |
+| `store` | SQLite access, migrations, repositories | none |
 | `core` | Types, container reader, features, NCC, period, tracking, diff, time map, naming | none |
 
 ```text

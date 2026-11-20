@@ -185,6 +185,11 @@ dispatch switches to HTTP.
 The boundary editor needs real client state, which rules out htmx, and Svelte adds
 little runtime weight.
 
+Tooling (2026-11-08): Node LTS and npm only, with a committed `package-lock.json` and no Bun,
+so one runtime serves Vite, Vitest and Playwright. A Rust build without `web/dist` still
+compiles and serves a page that says the UI is not built, so the crates need no Node; the
+image checks that the build is there.
+
 ### D-19 Public repository rules
 
 The repository is public.

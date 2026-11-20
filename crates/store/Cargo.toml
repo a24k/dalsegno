@@ -7,7 +7,6 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-dalsegno-core.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true
 
