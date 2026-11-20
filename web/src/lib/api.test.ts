@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
-import { ApiError, createClient } from './api'
+import { ApiError, createClient, errorMessage } from './api'
 
 function answer(status: number, body: unknown): typeof fetch {
   return vi.fn(async () => new Response(JSON.stringify(body), { status }))
@@ -32,6 +32,24 @@ describe('createClient', () => {
     expect(init?.body).toBe('{"a":null}')
   })
 
+  test('patches a body as JSON', async () => {
+    const fetcher = answer(200, { success: true, data: { id: 3 }, error: null, meta: null })
+    const data = await createClient(fetcher).patch<{ id: number }>('/streams/3', { title: 'x' })
+    expect(data).toEqual({ id: 3 })
+    const init = vi.mocked(fetcher).mock.calls[0][1]
+    expect(init?.method).toBe('PATCH')
+    expect(init?.body).toBe('{"title":"x"}')
+  })
+
+  test('deletes without a body', async () => {
+    const fetcher = answer(200, { success: true, data: { id: 5 }, error: null, meta: null })
+    const data = await createClient(fetcher).delete<{ id: number }>('/programs/1/known-clips/5')
+    expect(data).toEqual({ id: 5 })
+    const init = vi.mocked(fetcher).mock.calls[0][1]
+    expect(init?.method).toBe('DELETE')
+    expect(init?.body).toBeUndefined()
+  })
+
   test('raises the code and message the service gave', async () => {
     const error = { code: 'not_found', message: 'no such stream' }
     const fetcher = answer(404, { success: false, data: null, error, meta: null })
@@ -56,5 +74,17 @@ describe('createClient', () => {
       status: 0,
       code: 'unreachable',
     })
+  })
+})
+
+describe('errorMessage', () => {
+  test('gives the message of an API error', () => {
+    expect(errorMessage(new ApiError(409, 'invalid_request', 'refused'), 'fallback')).toBe(
+      'refused',
+    )
+  })
+
+  test('gives the fallback for anything else', () => {
+    expect(errorMessage(new Error('boom'), 'fallback')).toBe('fallback')
   })
 })

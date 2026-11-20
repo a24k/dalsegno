@@ -57,3 +57,27 @@ test('diagnostics run in the service and show its tools', async ({ page }) => {
   await expect(page.getByRole('row', { name: /ffmpeg/ })).toBeVisible()
   await expect(page.getByText('none since the service started')).toBeVisible()
 })
+
+test('the streams screen loads with its empty state', async ({ page }) => {
+  await page.goto('/streams')
+
+  await expect(page.getByRole('heading', { level: 1, name: 'Streams' })).toBeVisible()
+  await expect(page.getByText('No streams yet.')).toBeVisible()
+  await expect(page.getByLabel('Video ID or URL')).toBeVisible()
+})
+
+test('adding something that is not a video shows the reason', async ({ page }) => {
+  await page.goto('/streams')
+
+  await page.getByLabel('Video ID or URL').fill('not a video')
+  await page.getByRole('button', { name: 'Add the stream' }).click()
+
+  await expect(page.getByRole('alert')).toBeVisible()
+  await expect(page.getByText('No streams yet.')).toBeVisible()
+})
+
+test('a stream that does not exist is not found', async ({ page }) => {
+  await page.goto('/streams/9999')
+
+  await expect(page.getByRole('heading', { level: 1, name: 'Not found' })).toBeVisible()
+})
