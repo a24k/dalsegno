@@ -1,8 +1,9 @@
 // Live updates from GET /api/v1/events, with reconnection.
 //
-// Events carry no history, so whenever the connection opens, and whenever the service says
-// this page fell behind, the page refetches what it shows (onResync). A page subscribes
-// first and fetches on that call, so it misses nothing in between.
+// Events carry no history. The service opens each connection with a resync, and sends another
+// when this page fell behind, and on each the page refetches what it shows (onResync). A page
+// subscribes first and fetches on that call, so it misses nothing in between. The resync also
+// names the service's version (onVersion).
 
 import { API_BASE } from './api'
 
@@ -19,6 +20,7 @@ const LONGEST_DELAY_MS = 30_000
 export interface Handlers {
   onEvent(topic: Topic, data: unknown): void
   onResync(): void
+  onVersion(version: string): void
   onConnected(isConnected: boolean): void
 }
 
@@ -51,6 +53,14 @@ function parse(text: string): unknown {
   }
 }
 
+/** The version a resync names, or null when it names none. */
+function versionOf(data: unknown): string | null {
+  if (typeof data !== 'object' || data === null || !('version' in data)) {
+    return null
+  }
+  return typeof data.version === 'string' ? data.version : null
+}
+
 /** Connects and keeps reconnecting until the returned function is called. */
 export function connect(handlers: Handlers, options: Options = {}): () => void {
   const open = options.open ?? ((url) => new EventSource(url))
@@ -73,7 +83,6 @@ export function connect(handlers: Handlers, options: Options = {}): () => void {
     current.onopen = () => {
       attempt = 0
       handlers.onConnected(true)
-      handlers.onResync()
     }
     current.onerror = () => {
       // EventSource retries on its own at a fixed pace; this backs off instead.
@@ -84,7 +93,13 @@ export function connect(handlers: Handlers, options: Options = {}): () => void {
         attempt += 1
       }
     }
-    current.addEventListener(RESYNC, () => handlers.onResync())
+    current.addEventListener(RESYNC, (event) => {
+      const version = versionOf(parse(event.data))
+      if (version !== null) {
+        handlers.onVersion(version)
+      }
+      handlers.onResync()
+    })
     for (const topic of TOPICS) {
       current.addEventListener(topic, (event) => {
         const data = parse(event.data)

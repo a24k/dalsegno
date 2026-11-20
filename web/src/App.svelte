@@ -46,7 +46,10 @@
 
 <a class="skip" href="#main">Skip to content</a>
 <header>
-  <a class="brand" href="/">dalsegno</a>
+  <div class="identity">
+    <a class="brand" href="/">dalsegno</a>
+    {#if live.version}<span class="version">{live.version}</span>{/if}
+  </div>
   <nav aria-label="Main">
     <ul>
       {#each NAVIGATION as [path, label] (path)}

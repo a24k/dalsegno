@@ -193,10 +193,14 @@ async fn the_event_stream_carries_what_is_published() {
     );
     let headers = response.headers().clone();
     let mut body = response.into_body().into_data_stream();
+    let opening = body.next().await.unwrap().unwrap();
     let chunk = body.next().await.unwrap().unwrap();
 
     assert_eq!(headers[header::CONTENT_TYPE], "text/event-stream");
     assert_eq!(headers["x-accel-buffering"], "no");
+    let opening = String::from_utf8(opening.to_vec()).unwrap();
+    assert!(opening.starts_with("event: resync\n"));
+    assert!(opening.contains(env!("CARGO_PKG_VERSION")));
     let text = String::from_utf8(chunk.to_vec()).unwrap();
     assert!(text.contains("event: stream.state\n"));
     assert!(text.contains(&format!("{{\"id\":{}}}", fixture.stream)));

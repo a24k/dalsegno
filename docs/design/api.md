@@ -44,8 +44,10 @@
 
 SSE events are `job.progress`, `stream.state`, `change.updated` (D-33). Each one's `data` is
 the object the jobs, streams or changes list returns for that ID, sent when it is new or
-differs, within about a second. A `resync` event tells a page that fell behind to refetch, as
-it does whenever its connection opens; the Web UI reconnects with a backoff from 1 s to 30 s.
+differs, within about a second. A `resync` event tells a page that fell behind to refetch, and
+opens each connection, so a page refetches whenever it connects. Its `data` is
+`{"version": ...}`, the version of the running service, which the Web UI shows on every screen.
+The Web UI reconnects with a backoff from 1 s to 30 s.
 
 `POST /jobs` takes `{"kind": ...}` with `backfill` (`stream`, optional `hours` up to 120),
 `features`, `analysis` (`stream`), `sweep`, or `fetch` (`stream`, `itag`, `first`, `last`, at

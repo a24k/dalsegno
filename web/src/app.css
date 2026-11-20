@@ -67,6 +67,17 @@ header {
   text-decoration: none;
 }
 
+.identity {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.version {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
 nav ul {
   display: flex;
   flex-wrap: wrap;

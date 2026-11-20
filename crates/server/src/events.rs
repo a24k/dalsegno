@@ -12,7 +12,7 @@ use axum::response::sse;
 use dalsegno_app::fetch::{SharedDatabase, lock};
 use dalsegno_store::database::Database;
 use futures_util::{Stream, StreamExt, stream};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -32,7 +32,8 @@ pub const CAPACITY: usize = 256;
 const WINDOW: u32 = 200;
 /// Every stream is read; there are a handful.
 const STREAMS: u32 = 1000;
-/// Sent to a subscriber that fell behind, which then refetches what it shows.
+/// Opens every subscription and goes to one that fell behind, which then refetches what it
+/// shows. It carries the version of the running service.
 const RESYNC: &str = "resync";
 
 /// What an event is about.
@@ -145,21 +146,28 @@ impl EventBus {
         self.closed.send_replace(true);
     }
 
-    /// The events from now on as SSE, until the bus closes.
+    /// A resync, then the events from now on as SSE, until the bus closes.
     pub fn subscribe(&self) -> impl Stream<Item = Result<sse::Event, Infallible>> + Send + use<> {
         let mut closed = self.closed.subscribe();
         let updates = stream::unfold(self.sender.subscribe(), |mut receiver| async move {
             let message = match receiver.recv().await {
                 Ok(event) => to_sse(&event),
-                Err(RecvError::Lagged(_)) => sse::Event::default().event(RESYNC).data("{}"),
+                Err(RecvError::Lagged(_)) => resync(),
                 Err(RecvError::Closed) => return None,
             };
             Some((Ok(message), receiver))
         });
-        updates.take_until(async move {
-            let _ = closed.wait_for(|is_closed| *is_closed).await;
-        })
+        stream::once(async { Ok(resync()) })
+            .chain(updates)
+            .take_until(async move {
+                let _ = closed.wait_for(|is_closed| *is_closed).await;
+            })
     }
+}
+
+fn resync() -> sse::Event {
+    let data = json!({ "version": env!("CARGO_PKG_VERSION") });
+    sse::Event::default().event(RESYNC).data(data.to_string())
 }
 
 fn to_sse(event: &Event) -> sse::Event {
@@ -215,7 +223,6 @@ mod tests {
     use axum::body::Bytes;
     use dalsegno_app::acquisition::Library;
     use dalsegno_store::jobs::{JobClass, NewJob};
-    use serde_json::json;
     use std::pin::pin;
     use tempfile::tempdir;
     use tokio::time::timeout;
@@ -241,6 +248,14 @@ mod tests {
             .unwrap()
             .unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    /// What a subscription opens with, and a lagging one is sent.
+    fn resync_wire() -> String {
+        format!(
+            "event: resync\ndata: {{\"version\":\"{}\"}}\n\n",
+            env!("CARGO_PKG_VERSION")
+        )
     }
 
     #[test]
@@ -295,11 +310,12 @@ mod tests {
         bus.publish(Topic::Job, json!({"id": 1}));
         bus.publish(Topic::Stream, json!({"id": 2}));
         bus.publish(Topic::Change, json!({"id": 3}));
-        let text = wire(events, 3).await;
+        let text = wire(events, 4).await;
 
         assert_eq!(
             text,
-            "id: 1\nevent: job.progress\ndata: {\"id\":1}\n\n\
+            resync_wire()
+                + "id: 1\nevent: job.progress\ndata: {\"id\":1}\n\n\
              id: 2\nevent: stream.state\ndata: {\"id\":2}\n\n\
              id: 3\nevent: change.updated\ndata: {\"id\":3}\n\n"
         );
@@ -313,16 +329,27 @@ mod tests {
 
         // Nothing reads yet, and publishing past the capacity still returns at once.
         (1..=5).for_each(|id| bus.publish(Topic::Job, json!({ "id": id })));
-        let quick_text = wire(quick, 1).await;
-        let slow_text = wire(slow, 3).await;
+        let quick_text = wire(quick, 2).await;
+        let slow_text = wire(slow, 4).await;
 
-        assert!(quick_text.starts_with("event: resync\n"));
+        assert!(quick_text.starts_with(&resync_wire()));
+        assert!(quick_text.ends_with(&resync_wire()));
         assert_eq!(
             slow_text,
-            "event: resync\ndata: {}\n\n\
-             id: 4\nevent: job.progress\ndata: {\"id\":4}\n\n\
-             id: 5\nevent: job.progress\ndata: {\"id\":5}\n\n"
+            resync_wire()
+                + &resync_wire()
+                + "id: 4\nevent: job.progress\ndata: {\"id\":4}\n\n\
+                   id: 5\nevent: job.progress\ndata: {\"id\":5}\n\n"
         );
+    }
+
+    #[tokio::test]
+    async fn every_subscription_opens_with_the_running_version() {
+        let bus = EventBus::new(CAPACITY);
+
+        let text = wire(bus.subscribe(), 1).await;
+
+        assert_eq!(text, resync_wire());
     }
 
     #[tokio::test]
@@ -348,7 +375,7 @@ mod tests {
             Duration::from_millis(10),
             shutdown,
         ));
-        let mut events = pin!(bus.subscribe());
+        let mut events = pin!(bus.subscribe().skip(1));
         // Let the watcher take its first reading, which publishes nothing.
         sleep(Duration::from_millis(50)).await;
 
