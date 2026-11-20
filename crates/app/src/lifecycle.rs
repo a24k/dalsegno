@@ -22,29 +22,48 @@ pub const FEATURES: &str = "features";
 pub const ANALYSIS: &str = "analysis";
 /// The job that fetches the video around a change.
 pub const PREFETCH: &str = "prefetch";
+/// The job that fetches a range of one format, as `dalsegno fetch` asks.
+pub const FETCH: &str = "fetch";
 
 /// What a job about a stream is about.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamTarget {
     /// Video ID.
     pub stream: String,
+    /// How far back a backfill reaches, when someone asked for other than the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hours: Option<f64>,
 }
 
 impl StreamTarget {
     fn job(row: &StreamRow, kind: &str, class: JobClass) -> Result<NewJob, AcquireError> {
-        let target = Self {
+        Self {
             stream: row.stream.video_id.clone(),
-        };
+            hours: None,
+        }
+        .into_job(kind, class)
+    }
+
+    fn into_job(self, kind: &str, class: JobClass) -> Result<NewJob, AcquireError> {
         Ok(NewJob {
             kind: kind.to_string(),
             class,
-            target: serde_json::to_string(&target).map_err(|_| AcquireError::Task)?,
+            target: serde_json::to_string(&self).map_err(|_| AcquireError::Task)?,
         })
     }
 
     /// Returns the job that fills a stream's gaps.
     pub fn backfill(row: &StreamRow) -> Result<NewJob, AcquireError> {
         Self::job(row, BACKFILL, JobClass::NetLow)
+    }
+
+    /// Returns a backfill that reaches `hours` back.
+    pub fn backfill_hours(row: &StreamRow, hours: f64) -> Result<NewJob, AcquireError> {
+        Self {
+            stream: row.stream.video_id.clone(),
+            hours: Some(hours),
+        }
+        .into_job(BACKFILL, JobClass::NetLow)
     }
 
     /// Returns the job that brings a stream's envelope up to date.
@@ -81,6 +100,35 @@ impl PrefetchTarget {
     pub fn job(&self) -> Result<NewJob, AcquireError> {
         Ok(NewJob {
             kind: PREFETCH.to_string(),
+            class: JobClass::NetLow,
+            target: serde_json::to_string(self).map_err(|_| AcquireError::Task)?,
+        })
+    }
+
+    /// Reads a stored target.
+    pub fn parse(target: &str) -> Option<Self> {
+        serde_json::from_str(target).ok()
+    }
+}
+
+/// A range of one format to fetch into the library.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FetchTarget {
+    /// Video ID.
+    pub stream: String,
+    /// Format.
+    pub itag: u32,
+    /// First `sq`.
+    pub first: u64,
+    /// Last `sq`.
+    pub last: u64,
+}
+
+impl FetchTarget {
+    /// Returns the job.
+    pub fn job(&self) -> Result<NewJob, AcquireError> {
+        Ok(NewJob {
+            kind: FETCH.to_string(),
             class: JobClass::NetLow,
             target: serde_json::to_string(self).map_err(|_| AcquireError::Task)?,
         })

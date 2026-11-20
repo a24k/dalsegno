@@ -10,5 +10,6 @@ pub mod jobs;
 pub mod notifications;
 pub mod programs;
 pub mod retention;
+pub mod settings;
 pub mod status;
 pub mod streams;

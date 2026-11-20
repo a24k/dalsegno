@@ -1,13 +1,14 @@
 //! HTTP API, scheduler, job runner and stream supervisors.
 
-use api::{ApiState, router};
-use dalsegno_app::acquisition::{Acquisition, AcquisitionOptions, IpPolicy, Library};
+use api::{ApiState, Services, router};
+use dalsegno_app::acquisition::{Acquisition, AcquisitionOptions, FetchRequest, IpPolicy, Library};
 use dalsegno_app::backfill::DEFAULT_HOURS;
 use dalsegno_app::config::Config;
 use dalsegno_app::fetch::FetchLimits;
 use dalsegno_app::lifecycle::{
-    ANALYSIS, BACKFILL, FEATURES, PREFETCH, PrefetchTarget, StreamTarget,
+    ANALYSIS, BACKFILL, FEATURES, FETCH, FetchTarget, PREFETCH, PrefetchTarget, StreamTarget,
 };
+use dalsegno_app::settings::{LiveSettings, Operational};
 use dalsegno_io::webhook::Webhook;
 use dalsegno_store::jobs::JobRow;
 use dalsegno_store::streams::StreamRow;
@@ -23,6 +24,7 @@ use tokio::sync::watch;
 pub mod api;
 pub mod events;
 pub mod notifier;
+mod operations;
 pub mod runner;
 pub mod scheduler;
 pub mod supervisor;
@@ -43,6 +45,10 @@ impl Service {
             return report.map(drop).map_err(|error| error.to_string());
         }
         let invalid = || format!("the target of job {} is not valid", job.id);
+        if kind == FETCH {
+            let target = FetchTarget::parse(&job.job.target).ok_or_else(invalid)?;
+            return self.fetch(target).await;
+        }
         if kind == PREFETCH {
             let target = PrefetchTarget::parse(&job.job.target).ok_or_else(invalid)?;
             let done = self.acquisition.prefetch(&self.library, &target).await;
@@ -54,8 +60,9 @@ impl Service {
             BACKFILL => {
                 let database = self.library.database();
                 let progress = |progress| record_progress(&database, job.id, progress);
+                let hours = target.hours.unwrap_or(DEFAULT_HOURS);
                 self.acquisition
-                    .backfill(&self.library, stream, DEFAULT_HOURS, &progress)
+                    .backfill(&self.library, stream, hours, &progress)
                     .await
                     .map(drop)
             }
@@ -64,6 +71,55 @@ impl Service {
             other => return Err(format!("unknown job kind {other}")),
         };
         done.map_err(|error| error.to_string())
+    }
+}
+
+impl Service {
+    /// Fetches a range into the library, as `dalsegno fetch` asked, and fails unless all of
+    /// it arrived.
+    async fn fetch(&self, target: FetchTarget) -> Result<(), String> {
+        let request = FetchRequest {
+            stream: target.stream,
+            itag: target.itag,
+            first: target.first,
+            last: target.last,
+            output: None,
+        };
+        let report = self
+            .acquisition
+            .fetch(&self.library, request)
+            .await
+            .map_err(|error| error.to_string())?;
+        if report.is_complete() {
+            return Ok(());
+        }
+        Err(format!(
+            "range incomplete: {} lost, {} failed",
+            report.lost.len(),
+            report.failed.len()
+        ))
+    }
+}
+
+/// Hands each change of the request budget to the shared scheduler until the service stops.
+async fn apply_limits(
+    mut settings: watch::Receiver<Operational>,
+    acquisition: Acquisition,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            changed = settings.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let limits = settings.borrow_and_update().limits;
+                if let Err(error) = acquisition.set_limits(limits) {
+                    tracing::warn!(error = %error, "the new request budget was not applied");
+                }
+            }
+            _ = shutdown.wait_for(|is_stopping| *is_stopping) => break,
+        }
     }
 }
 
@@ -99,6 +155,22 @@ pub async fn serve(config: &Config, policy: IpPolicy, limits: FetchLimits) -> an
         cookies: config.cookies.clone(),
         limits,
     })?;
+    let base = Operational {
+        limits,
+        daily_summary: config.daily_summary,
+    };
+    let (settings, left_off) = LiveSettings::load(base, database.clone())?;
+    acquisition.set_limits(settings.current().limits)?;
+    let ignored: Vec<String> = config
+        .ignored
+        .iter()
+        .cloned()
+        .chain(
+            left_off
+                .iter()
+                .map(|key| format!("the stored {key} setting")),
+        )
+        .collect();
     let listener = TcpListener::bind(config.bind).await?;
     // The image binds every address inside its container and leaves the limit to the published
     // port, so this is a reminder at start rather than a warning on every run.
@@ -109,11 +181,16 @@ pub async fn serve(config: &Config, policy: IpPolicy, limits: FetchLimits) -> an
              authenticating proxy in front (D-20)"
         );
     }
-    let state = ApiState::new(library.clone(), config.public_url.as_deref());
+    let services = Services {
+        acquisition: acquisition.clone(),
+        settings: settings.clone(),
+        bootstrap: config.bootstrap_view(),
+    };
+    let state = ApiState::new(library.clone(), config.public_url.as_deref(), services);
     let bus = state.events();
     let api = router(state);
     let service = Arc::new(Service {
-        acquisition,
+        acquisition: acquisition.clone(),
         library,
     });
     let runner = Arc::new(JobRunner::new(database.clone(), service.clone()));
@@ -123,17 +200,22 @@ pub async fn serve(config: &Config, policy: IpPolicy, limits: FetchLimits) -> an
         requeued,
         "service starting"
     );
-    for problem in &config.ignored {
+    for problem in &ignored {
         tracing::warn!(problem, "setting ignored");
     }
-    if let Err(error) = notifier::announce_start(&database, requeued, &config.ignored) {
+    if let Err(error) = notifier::announce_start(&database, requeued, &ignored) {
         tracing::warn!(error, "the start was not announced");
     }
     let (stop, shutdown) = watch::channel(false);
     let jobs = tokio::spawn(runner.run(shutdown.clone()));
     let schedule = tokio::spawn(run_scheduler(
         database.clone(),
-        config.daily_summary,
+        settings.subscribe(),
+        shutdown.clone(),
+    ));
+    let budget = tokio::spawn(apply_limits(
+        settings.subscribe(),
+        acquisition,
         shutdown.clone(),
     ));
     let notices = config
@@ -166,6 +248,7 @@ pub async fn serve(config: &Config, policy: IpPolicy, limits: FetchLimits) -> an
     streams.await?;
     jobs.await?;
     schedule.await?;
+    budget.await?;
     if let Some(notices) = notices {
         notices.await?;
     }

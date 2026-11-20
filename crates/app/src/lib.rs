@@ -20,5 +20,6 @@ pub mod remote;
 pub mod retention;
 pub mod schedule;
 pub mod session;
+pub mod settings;
 pub mod summary;
 pub mod time;

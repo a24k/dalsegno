@@ -169,6 +169,19 @@ impl Acquisition {
         })
     }
 
+    /// The request budget every stream and job shares.
+    pub fn limits(&self) -> FetchLimits {
+        self.requests.limits()
+    }
+
+    /// Changes the shared request budget for the requests that start from now on, checked as
+    /// it is at start (D-24).
+    pub fn set_limits(&self, limits: FetchLimits) -> Result<(), AcquireError> {
+        limits.validate()?;
+        self.requests.set_limits(limits);
+        Ok(())
+    }
+
     /// Reports tools, routes and the family state, with URL resolution if a stream is given.
     pub async fn doctor(&self, stream: Option<&str>) -> Result<DoctorReport, AcquireError> {
         let video = stream.map(parse_stream).transpose()?;
@@ -457,6 +470,25 @@ mod tests {
             Acquisition::new(options),
             Err(AcquireError::InvalidRequest(_))
         ));
+    }
+
+    #[test]
+    fn new_limits_are_checked_before_they_apply() {
+        let acquisition = acquisition();
+        let before = acquisition.limits();
+        let stalled = FetchLimits {
+            concurrency: 0,
+            ..before
+        };
+        let slower = FetchLimits {
+            requests_per_second: 1.0,
+            ..before
+        };
+
+        assert!(acquisition.set_limits(stalled).is_err());
+        assert_eq!(acquisition.limits(), before);
+        acquisition.set_limits(slower).unwrap();
+        assert_eq!(acquisition.limits(), slower);
     }
 
     #[tokio::test]

@@ -89,7 +89,7 @@ pub struct Config {
 
 /// Reads a time such as `09:00`. Quotes around it are dropped, as a compose list item
 /// (`- KEY="09:00"`) passes them on.
-fn parse_summary_time(text: &str) -> Option<NaiveTime> {
+pub(crate) fn parse_summary_time(text: &str) -> Option<NaiveTime> {
     let unquoted = text
         .trim()
         .trim_matches(|character| character == '"' || character == '\'');
@@ -166,6 +166,30 @@ impl Config {
     }
 }
 
+impl Config {
+    /// What the settings screen shows of the bootstrap values (D-24). Secrets and the cookie
+    /// file show only whether they are set.
+    pub fn bootstrap_view(&self) -> serde_json::Value {
+        let path = |path: &Path| path.display().to_string();
+        let format = match self.webhook_format {
+            WebhookFormat::Slack => "slack",
+            WebhookFormat::Mattermost => "mattermost",
+            WebhookFormat::Ntfy => "ntfy",
+        };
+        serde_json::json!({
+            "data": path(&self.data),
+            "library": self.library.as_deref().map(path),
+            "bind": self.bind.to_string(),
+            "cookies": self.cookies.is_some(),
+            "webhook": self.webhook.is_some(),
+            "webhook_format": format,
+            "public_url": self.public_url,
+            "plex_url": self.plex_url,
+            "plex_token": self.plex_token.is_some(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,6 +214,21 @@ mod tests {
         assert_eq!(config.data, PathBuf::from("/data"));
         assert_eq!(config.library, Some(PathBuf::from("/library")));
         assert_eq!(config.bind.port(), 9000);
+    }
+
+    #[test]
+    fn the_bootstrap_view_says_whether_a_secret_is_set_and_never_shows_it() {
+        let secret = "https://hooks.example/T000/B000/XXXX";
+        let environment = |name: &str| (name == "DALSEGNO_WEBHOOK").then(|| secret.to_string());
+        let config = Config::merge(file("data = \"/data\""), environment).unwrap();
+
+        let view = config.bootstrap_view();
+
+        assert_eq!(view["data"], "/data");
+        assert_eq!(view["webhook"], true);
+        assert_eq!(view["plex_token"], false);
+        assert_eq!(view["webhook_format"], "slack");
+        assert!(!view.to_string().contains(secret));
     }
 
     #[test]
