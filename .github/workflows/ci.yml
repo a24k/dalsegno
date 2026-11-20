@@ -18,15 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: docker build --tag dalsegno .
-      - name: Every tool is in the image
-        run: |
-          docker run --rm dalsegno dalsegno --json doctor \
-            | jq --exit-status '.tools | all(.path != null)'
       - name: Its ffmpeg can refuse redirects, as the thumbnail fetch asks it to
         run: |
           docker run --rm dalsegno ffmpeg -hide_banner -h protocol=https \
             | grep -- '-max_redirects' > /dev/null
-      - name: The service starts, serves the Web UI and stops on its stop signal
+      - name: The service starts and serves the Web UI
         run: |
           docker run --detach --name dalsegno --publish 127.0.0.1:8737:8737 dalsegno
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
@@ -36,6 +32,12 @@ jobs:
             sleep 1
           done
           grep '<div id="app">' index.html > /dev/null
+      - name: Every tool is in the image, as the service's doctor finds it
+        run: |
+          docker exec dalsegno dalsegno --json doctor \
+            | jq --exit-status '.doctor.tools | all(.path != null)'
+      - name: The service stops on its stop signal
+        run: |
           docker stop --time 20 dalsegno
           test "$(docker inspect --format '{{.State.ExitCode}}' dalsegno)" = 0
 
