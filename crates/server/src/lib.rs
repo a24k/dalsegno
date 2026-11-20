@@ -22,7 +22,9 @@ use tokio::signal;
 use tokio::sync::watch;
 
 pub mod api;
+mod catalog;
 pub mod events;
+mod known;
 pub mod notifier;
 mod operations;
 pub mod runner;

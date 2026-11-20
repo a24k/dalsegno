@@ -6,8 +6,8 @@ use dalsegno_app::acquisition::{Acquisition, AcquisitionOptions, Library};
 use dalsegno_app::analysis::PeriodConfig;
 use dalsegno_app::config::Config;
 use dalsegno_app::export::{
-    AirTime, CutRequest, DEFAULT_SUFFIX, DEFAULT_TEMPLATE, ExportKind, NewProgram, Ownership,
-    PlexTarget, PublishRequest, Redacted, TagEdits, find_tools,
+    AirTime, CutRequest, ExportKind, Ownership, PlexTarget, PublishRequest, Redacted, TagEdits,
+    find_tools,
 };
 use dalsegno_app::fetch::FetchLimits;
 use dalsegno_app::offline::{self, DiffRequest};
@@ -17,11 +17,11 @@ use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use text::{
-    add_text, candidates_text, cut_text, diff_text, period_text, publish_text, refine_text,
-    scan_text,
+    candidates_text, cut_text, diff_text, period_text, publish_text, refine_text, scan_text,
 };
 use tracing_subscriber::filter::LevelFilter;
 
+mod catalog;
 mod remote;
 mod text;
 
@@ -101,15 +101,23 @@ enum Command {
         #[arg(long)]
         stream: Option<String>,
     },
-    /// Show the shared settings, after changing them when given KEY=VALUE or --reset.
+    /// Show the shared settings, after changing them when given KEY=VALUE or --reset. With
+    /// --stream or --program it changes that stream's title or that program's fields instead.
     Set {
-        /// Setting to change, as KEY=VALUE, such as concurrency=2 or daily_summary=09:00.
+        /// What to change, as KEY=VALUE, such as concurrency=2, daily_summary=09:00 or, with
+        /// --stream, title=Example.
         pairs: Vec<String>,
         /// Setting whose override to drop.
         #[arg(long = "reset", value_name = "KEY")]
         resets: Vec<String>,
+        /// Change the title of this stream, by video ID or URL.
+        #[arg(long, conflicts_with_all = ["program", "resets"])]
+        stream: Option<String>,
+        /// Change fields of this program, by ID, such as short_name=Example or artist=Example.
+        #[arg(long, conflicts_with_all = ["stream", "resets"])]
+        program: Option<i64>,
     },
-    /// Probe a stream and register it.
+    /// Probe a stream and register it, which can take a few minutes.
     Add {
         /// Video ID or URL.
         stream: String,
@@ -181,11 +189,11 @@ enum Command {
         #[arg(long)]
         output_dir: String,
         /// Template for output names.
-        #[arg(long, default_value = DEFAULT_TEMPLATE)]
-        template: String,
+        #[arg(long)]
+        template: Option<String>,
         /// Suffix of addition names.
-        #[arg(long, default_value = DEFAULT_SUFFIX)]
-        suffix: String,
+        #[arg(long)]
+        suffix: Option<String>,
         /// The `artist` tag.
         #[arg(long)]
         artist: Option<String>,
@@ -195,6 +203,40 @@ enum Command {
         /// The `description` tag of a cycle.
         #[arg(long)]
         description: Option<String>,
+    },
+    /// Show the programs, with the streams linked to each.
+    Programs,
+    /// Make a stream part of a program.
+    Link {
+        /// Video ID or URL.
+        stream: String,
+        /// Program ID.
+        program: i64,
+    },
+    /// Show a program's versions, newest first.
+    Versions {
+        /// Program ID.
+        program: i64,
+    },
+    /// List a program's known clips, or with --add or --remove change them.
+    Known {
+        /// Program ID.
+        program: i64,
+        /// Name of a clip to add, cut from the stored envelope of --stream.
+        #[arg(long, requires_all = ["stream", "from", "to"], conflicts_with = "remove")]
+        add: Option<String>,
+        /// Video ID or URL of the stream to cut from.
+        #[arg(long, requires = "add")]
+        stream: Option<String>,
+        /// Stream time the clip starts, in seconds.
+        #[arg(long, requires = "add")]
+        from: Option<f64>,
+        /// Stream time the clip ends, in seconds.
+        #[arg(long, requires = "add")]
+        to: Option<f64>,
+        /// ID of a clip to remove.
+        #[arg(long)]
+        remove: Option<i64>,
     },
     /// List where a cut near a stream time could start and end. A person chooses.
     Candidates {
@@ -345,8 +387,66 @@ async fn run_remote(command: Command, url: &str, json: bool) -> anyhow::Result<O
         Command::Doctor { stream } => {
             remote::doctor(&client()?, stream.as_deref(), json).await?;
         }
-        Command::Set { pairs, resets } => {
-            remote::set(&client()?, &pairs, &resets, json).await?;
+        Command::Set {
+            pairs,
+            resets,
+            stream,
+            program,
+        } => match (stream, program) {
+            (Some(stream), _) => catalog::set_stream(&client()?, &stream, &pairs, json).await?,
+            (None, Some(program)) => {
+                catalog::set_program(&client()?, program, &pairs, json).await?;
+            }
+            (None, None) => remote::set(&client()?, &pairs, &resets, json).await?,
+        },
+        Command::Add { stream } => catalog::add(&client()?, &stream, json).await?,
+        Command::Program {
+            stream,
+            short_name,
+            output_dir,
+            template,
+            suffix,
+            artist,
+            date,
+            description,
+        } => {
+            let args = catalog::ProgramArgs {
+                short_name,
+                output_dir,
+                template,
+                suffix,
+                artist,
+                date,
+                description,
+            };
+            catalog::program(&client()?, &stream, &args, json).await?;
+        }
+        Command::Programs => catalog::programs(&client()?, json).await?,
+        Command::Link { stream, program } => {
+            catalog::link(&client()?, &stream, program, json).await?;
+        }
+        Command::Versions { program } => catalog::versions(&client()?, program, json).await?,
+        Command::Known {
+            program,
+            add,
+            stream,
+            from,
+            to,
+            remove,
+        } => {
+            let action = match (add, stream, from, to, remove) {
+                (Some(name), Some(stream), Some(from), Some(to), None) => {
+                    catalog::KnownAction::Add {
+                        name,
+                        stream,
+                        from,
+                        to,
+                    }
+                }
+                (None, _, _, _, Some(clip)) => catalog::KnownAction::Remove(clip),
+                _ => catalog::KnownAction::List,
+            };
+            catalog::known(&client()?, program, &action, json).await?;
         }
         Command::Backfill { stream, hours } => {
             let request = JobRequest::Backfill {
@@ -440,35 +540,6 @@ async fn main() -> anyhow::Result<()> {
         None => anyhow::Result::Err(anyhow!("this command needs --data-dir or DALSEGNO_DATA")),
     };
     match command {
-        Command::Add { stream } => {
-            let report = acquisition.add(&library()?, &stream).await?;
-            print_report(cli.json, &report, add_text)
-        }
-        Command::Program {
-            stream,
-            short_name,
-            output_dir,
-            template,
-            suffix,
-            artist,
-            date,
-            description,
-        } => {
-            let id = library()?.set_program(
-                &stream,
-                &NewProgram {
-                    short_name,
-                    channel_id: None,
-                    name_template: template,
-                    addition_suffix: suffix,
-                    artist,
-                    content_date: date,
-                    description,
-                    output_dir,
-                },
-            )?;
-            print_report(cli.json, &id, |id| format!("program: {id}\n"))
-        }
         Command::Candidates { stream, time } => {
             let tools = find_tools()?;
             let report = acquisition
@@ -564,6 +635,12 @@ async fn main() -> anyhow::Result<()> {
         | Command::Stop { .. }
         | Command::Doctor { .. }
         | Command::Set { .. }
+        | Command::Add { .. }
+        | Command::Program { .. }
+        | Command::Programs
+        | Command::Link { .. }
+        | Command::Versions { .. }
+        | Command::Known { .. }
         | Command::Backfill { .. }
         | Command::Features { .. }
         | Command::Sweep
@@ -636,109 +713,4 @@ fn print_report<T: Serialize>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::CommandFactory;
-    use clap::error::ErrorKind;
-
-    #[test]
-    fn cli_definition_is_valid() {
-        Cli::command().debug_assert();
-    }
-
-    #[test]
-    fn only_the_service_logs_what_it_does() {
-        let level = |args: &[&str]| log_level(Cli::try_parse_from(args).unwrap().command.as_ref());
-
-        assert_eq!(level(&["dalsegno", "serve"]), LevelFilter::INFO);
-        assert_eq!(level(&["dalsegno", "doctor"]), LevelFilter::WARN);
-        assert_eq!(level(&["dalsegno"]), LevelFilter::WARN);
-    }
-
-    #[test]
-    fn version_flag_is_reported() {
-        let err = Cli::try_parse_from(["dalsegno", "--version"]).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
-    }
-
-    #[test]
-    fn fetch_takes_a_range() {
-        let cli = Cli::try_parse_from([
-            "dalsegno",
-            "fetch",
-            "abcDEF123_-",
-            "--itag",
-            "140",
-            "--first",
-            "1",
-            "--last",
-            "2",
-        ])
-        .unwrap();
-
-        let Some(Command::Fetch { itag, last, .. }) = cli.command else {
-            panic!("expected fetch");
-        };
-        assert_eq!((itag, last), (140, 2));
-    }
-
-    #[test]
-    fn backfill_hours_are_optional() {
-        let hours = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
-            Some(Command::Backfill { hours, .. }) => hours,
-            _ => panic!("expected backfill"),
-        };
-
-        assert_eq!(hours(&["dalsegno", "backfill", "abcDEF123_-"]), None);
-        assert_eq!(
-            hours(&["dalsegno", "backfill", "abcDEF123_-", "--hours", "6"]),
-            Some(6.0)
-        );
-    }
-
-    #[test]
-    fn set_takes_pairs_and_resets() {
-        let cli = Cli::try_parse_from([
-            "dalsegno",
-            "set",
-            "concurrency=2",
-            "--reset",
-            "daily_summary",
-            "daily_summary=off",
-        ])
-        .unwrap();
-
-        let Some(Command::Set { pairs, resets }) = cli.command else {
-            panic!("expected set");
-        };
-        assert_eq!(pairs, ["concurrency=2", "daily_summary=off"]);
-        assert_eq!(resets, ["daily_summary"]);
-    }
-
-    #[test]
-    fn request_limits_come_from_the_arguments_or_the_defaults() {
-        let given = Cli::try_parse_from([
-            "dalsegno",
-            "--requests-per-second",
-            "2.5",
-            "--concurrency",
-            "1",
-            "doctor",
-        ])
-        .unwrap();
-        let defaults = Cli::try_parse_from(["dalsegno", "doctor"]).unwrap();
-
-        assert_eq!((given.requests_per_second, given.concurrency), (2.5, 1));
-        assert_eq!(
-            (defaults.requests_per_second, defaults.concurrency),
-            (4.0, 4)
-        );
-    }
-
-    #[test]
-    fn unknown_ip_policy_is_rejected() {
-        let error = Cli::try_parse_from(["dalsegno", "--ip-policy", "ipv4", "doctor"]).unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::ValueValidation);
-    }
-}
+mod tests;

@@ -1,6 +1,5 @@
 //! Plain-text reports.
 
-use dalsegno_app::acquisition::AddReport;
 use dalsegno_app::analysis::Diff;
 use dalsegno_app::doctor::DoctorReport;
 use dalsegno_app::export::{CandidateReport, CutReport, PublishReport, RefineReport};
@@ -187,12 +186,4 @@ pub(crate) fn probe_text(report: &ProbeReport) -> String {
         .iter()
         .map(|rejection| format!("rejected itag {}: {}\n", rejection.itag, rejection.reason));
     std::iter::once(summary).chain(rejected).collect()
-}
-
-pub(crate) fn add_text(report: &AddReport) -> String {
-    format!(
-        "stream id: {}\n{}",
-        report.stream_id,
-        probe_text(&report.probe)
-    )
 }

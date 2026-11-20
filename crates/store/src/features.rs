@@ -34,7 +34,7 @@ pub struct EnvelopeRow {
     pub values: Vec<f32>,
 }
 
-fn encode(values: &[f32]) -> Vec<u8> {
+pub(crate) fn encode(values: &[f32]) -> Vec<u8> {
     values
         .iter()
         .flat_map(|value| value.to_le_bytes())
@@ -202,6 +202,40 @@ impl Database {
             .collect()
     }
 
+    /// Returns the rows that hold any bin of `first_bin..end_bin`, in grid order.
+    pub fn envelope_rows_between(
+        &self,
+        stream_id: i64,
+        first_bin: u64,
+        end_bin: u64,
+    ) -> Result<Vec<EnvelopeRow>, StoreError> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT sq, first_bin, data FROM envelope \
+             WHERE stream_id = ?1 AND feature = ?2 AND first_bin < ?4 \
+             AND first_bin + LENGTH(data) / 4 > ?3 ORDER BY first_bin",
+        )?;
+        let raw: Vec<(i64, i64, Vec<u8>)> = statement
+            .query_map(
+                params![
+                    stream_id,
+                    ENVELOPE_FEATURE,
+                    first_bin as i64,
+                    end_bin as i64
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?
+            .collect::<Result<_, _>>()?;
+        raw.into_iter()
+            .map(|(sq, first_bin, data)| {
+                Ok(EnvelopeRow {
+                    sq: sq as u64,
+                    first_bin: first_bin as u64,
+                    values: decode(&data)?,
+                })
+            })
+            .collect()
+    }
+
     /// Returns the grid index just past the row of `sq`.
     pub fn envelope_end_bin(&self, stream_id: i64, sq: u64) -> Result<Option<u64>, StoreError> {
         let row: Option<(i64, i64)> = self
@@ -256,6 +290,24 @@ mod tests {
         database.advance_feature_run(&run, &replacement).unwrap();
 
         assert_eq!(database.envelope_rows(id, 10, 10).unwrap(), [replacement]);
+    }
+
+    #[test]
+    fn rows_between_two_bins_are_those_that_hold_any_of_them() {
+        let mut database = Database::open_in_memory().unwrap();
+        let id = stream(&database);
+        let run = database.insert_feature_run(id, 10, 50.0).unwrap();
+        for stored in [
+            row(10, 500, &[1.0, 2.0]),
+            row(11, 502, &[3.0, 4.0]),
+            row(12, 504, &[5.0]),
+        ] {
+            database.advance_feature_run(&run, &stored).unwrap();
+        }
+
+        let rows = database.envelope_rows_between(id, 501, 504).unwrap();
+
+        assert_eq!(rows.iter().map(|row| row.sq).collect::<Vec<_>>(), [10, 11]);
     }
 
     #[test]

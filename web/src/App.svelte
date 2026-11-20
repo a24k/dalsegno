@@ -3,6 +3,8 @@
   import Dashboard from './screens/Dashboard.svelte'
   import Jobs from './screens/Jobs.svelte'
   import Settings from './screens/Settings.svelte'
+  import Stream from './screens/Stream.svelte'
+  import Streams from './screens/Streams.svelte'
   import { live } from './lib/live.svelte'
   import { followLink, router } from './lib/router.svelte'
   import type { Screen } from './lib/routes'
@@ -62,6 +64,10 @@
   {#key router.path}
     {#if router.route.screen === 'dashboard'}
       <Dashboard />
+    {:else if router.route.screen === 'streams'}
+      <Streams />
+    {:else if router.route.screen === 'stream'}
+      <Stream />
     {:else if router.route.screen === 'jobs'}
       <Jobs />
     {:else if router.route.screen === 'settings'}

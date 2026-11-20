@@ -33,6 +33,11 @@ export class ApiError extends Error {
   }
 }
 
+/** The message of a failed request, or `fallback` for anything else. */
+export function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof ApiError ? error.message : fallback
+}
+
 type Fetch = typeof fetch
 
 function isEnvelope(value: unknown): value is Envelope<unknown> {
@@ -51,6 +56,8 @@ export interface Client {
   get<T>(path: string): Promise<Page<T>>
   post<T>(path: string, body?: unknown): Promise<T>
   put<T>(path: string, body: unknown): Promise<T>
+  patch<T>(path: string, body: unknown): Promise<T>
+  delete<T>(path: string): Promise<T>
 }
 
 /** Builds a client. Tests hand it their own fetch. */
@@ -88,6 +95,12 @@ export function createClient(fetcher: Fetch = (...args) => fetch(...args)): Clie
     },
     async put<T>(path: string, body: unknown): Promise<T> {
       return (await send(path, 'PUT', body)).data as T
+    },
+    async patch<T>(path: string, body: unknown): Promise<T> {
+      return (await send(path, 'PATCH', body)).data as T
+    },
+    async delete<T>(path: string): Promise<T> {
+      return (await send(path, 'DELETE', undefined)).data as T
     },
   }
 }

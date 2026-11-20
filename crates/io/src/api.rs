@@ -112,6 +112,29 @@ impl ApiClient {
         self.send_json(self.client.put(self.url(path)), body).await
     }
 
+    /// Patches with a JSON body, and returns the data.
+    pub async fn patch_json(&self, path: &str, body: &Value) -> Result<Value, ApiCallError> {
+        self.send_json(self.client.patch(self.url(path)), body)
+            .await
+    }
+
+    /// Deletes a resource, and returns the data.
+    pub async fn delete(&self, path: &str) -> Result<Value, ApiCallError> {
+        self.read(self.client.delete(self.url(path))).await
+    }
+
+    /// Posts a JSON body to an endpoint that takes long to answer, waiting `wait` instead of
+    /// the usual time.
+    pub async fn post_json_waiting(
+        &self,
+        path: &str,
+        body: &Value,
+        wait: Duration,
+    ) -> Result<Value, ApiCallError> {
+        self.send_json(self.client.post(self.url(path)).timeout(wait), body)
+            .await
+    }
+
     /// Reads an endpoint that takes long to answer, waiting `wait` instead of the usual time.
     pub async fn get_waiting(&self, path: &str, wait: Duration) -> Result<Value, ApiCallError> {
         self.read(self.client.get(self.url(path)).timeout(wait))
@@ -225,6 +248,57 @@ mod tests {
             .unwrap();
 
         assert_eq!(data, json!(1));
+    }
+
+    #[tokio::test]
+    async fn a_patch_and_a_delete_use_their_own_methods() {
+        let server = MockServer::start().await;
+        let body = json!({ "title": "Renamed" });
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/streams/1"))
+            .and(body_json(&body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": 1 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/programs/1/known-clips/2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": 2 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = ApiClient::new(&server.uri()).unwrap();
+
+        let patched = client.patch_json("/streams/1", &body).await.unwrap();
+        let deleted = client.delete("/programs/1/known-clips/2").await.unwrap();
+
+        assert_eq!((patched, deleted), (json!(1), json!(2)));
+    }
+
+    #[tokio::test]
+    async fn a_slow_post_is_waited_for_as_long_as_asked() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/streams"))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(json!({ "data": 1 }))
+                    .set_delay(Duration::from_millis(200)),
+            )
+            .mount(&server)
+            .await;
+        let client = ApiClient::new(&server.uri()).unwrap();
+        let body = json!({ "stream": "abcDEF123_-" });
+
+        let short = client
+            .post_json_waiting("/streams", &body, Duration::from_millis(20))
+            .await;
+        let long = client
+            .post_json_waiting("/streams", &body, Duration::from_secs(5))
+            .await;
+
+        assert!(matches!(short, Err(ApiCallError::Unreachable(_))));
+        assert_eq!(long.unwrap(), json!(1));
     }
 
     #[tokio::test]

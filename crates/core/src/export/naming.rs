@@ -12,6 +12,8 @@ pub const DEFAULT_SUFFIX: &str = "追加分";
 const JST_OFFSET_SECONDS: i64 = 9 * 3600;
 const SECONDS_PER_DAY: i64 = 86_400;
 /// Longest name, in bytes. File systems allow 255, and suffixes such as `-fanart.jpg` add to it.
+/// A moment to render sample names at, 2026-01-01 00:00 UTC.
+const SAMPLE_TIME: i64 = 1_767_225_600;
 const MAX_NAME_BYTES: usize = 200;
 
 /// What an export holds.
@@ -152,6 +154,24 @@ pub fn render_name(parts: &NameParts<'_>) -> Result<ExportName, NameError> {
         .unwrap_or(&name)
         .to_string();
     Ok(ExportName { name, title })
+}
+
+/// Checks that a template renders, by rendering it for a sample of each kind of name.
+pub fn check_template(template: &str, name: &str, suffix: &str) -> Result<(), NameError> {
+    for kind in [
+        ExportKind::FirstCycle,
+        ExportKind::Cycle,
+        ExportKind::Addition,
+    ] {
+        render_name(&NameParts {
+            template,
+            name,
+            suffix,
+            kind,
+            at: SAMPLE_TIME,
+        })?;
+    }
+    Ok(())
 }
 
 fn expand(
@@ -310,6 +330,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(name.name, "2026 - Example TV");
+    }
+
+    #[test]
+    fn a_template_that_renders_passes_the_check() {
+        assert_eq!(
+            check_template(DEFAULT_TEMPLATE, "Example TV", DEFAULT_SUFFIX),
+            Ok(())
+        );
+        assert_eq!(
+            check_template("{name} {oops}", "Example TV", DEFAULT_SUFFIX),
+            Err(NameError::UnknownPlaceholder("oops".to_string()))
+        );
+        assert_eq!(
+            check_template("{name", "Example TV", DEFAULT_SUFFIX),
+            Err(NameError::UnclosedPlaceholder)
+        );
     }
 
     #[test]

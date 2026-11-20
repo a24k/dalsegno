@@ -13,5 +13,5 @@ pub use boundary::{
 pub use info::sanitise_info;
 pub use naming::{
     DEFAULT_SUFFIX, DEFAULT_TEMPLATE, ExportKind, ExportName, JstTime, NameError, NameParts,
-    check_output_dir, render_name,
+    check_output_dir, check_template, render_name,
 };

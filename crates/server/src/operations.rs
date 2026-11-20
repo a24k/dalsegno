@@ -22,12 +22,12 @@ const MAX_BACKFILL_HOURS: f64 = 120.0;
 /// About five days of fragments, which is all the DVR holds.
 const MAX_FETCH_FRAGMENTS: u64 = 100_000;
 
-fn invalid(message: &str) -> ApiError {
+pub(crate) fn invalid(message: &str) -> ApiError {
     ApiError::new(StatusCode::BAD_REQUEST, "invalid_request", message)
 }
 
 /// Reads a JSON body into a validated type, answering in the envelope when it does not read.
-fn parse_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, ApiError> {
+pub(crate) fn parse_body<T: DeserializeOwned>(body: &Bytes) -> Result<T, ApiError> {
     serde_json::from_slice(body)
         .map_err(|error| invalid(&format!("the body is not valid: {error}")))
 }
