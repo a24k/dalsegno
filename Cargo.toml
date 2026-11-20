@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.6.0-rc.1"
+version = "0.6.0-rc.2"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/a24k/dalsegno"
@@ -16,6 +16,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 fastrand = "2"
+futures-util = { version = "0.3", default-features = false }
 rayon = "1"
 realfft = "3"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

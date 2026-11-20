@@ -21,6 +21,7 @@ use tokio::signal;
 use tokio::sync::watch;
 
 pub mod api;
+pub mod events;
 pub mod notifier;
 pub mod runner;
 pub mod scheduler;
@@ -108,7 +109,9 @@ pub async fn serve(config: &Config, policy: IpPolicy, limits: FetchLimits) -> an
              authenticating proxy in front (D-20)"
         );
     }
-    let api = router(ApiState::new(library.clone(), config.public_url.as_deref()));
+    let state = ApiState::new(library.clone(), config.public_url.as_deref());
+    let bus = state.events();
+    let api = router(state);
     let service = Arc::new(Service {
         acquisition,
         library,
@@ -143,6 +146,12 @@ pub async fn serve(config: &Config, policy: IpPolicy, limits: FetchLimits) -> an
                 Notifier::new(database.clone(), Arc::new(hook), config.public_url.clone());
             tokio::spawn(notifier.run(shutdown.clone()))
         });
+    let updates = tokio::spawn(events::run_watcher(
+        database.clone(),
+        bus,
+        events::POLL_INTERVAL,
+        shutdown.clone(),
+    ));
     let streams = tokio::spawn(Supervisor::new(database, service).run(shutdown.clone()));
     let http = tokio::spawn(
         axum::serve(listener, api)
@@ -153,6 +162,7 @@ pub async fn serve(config: &Config, policy: IpPolicy, limits: FetchLimits) -> an
     tracing::info!("service stopping");
     stop.send(true)?;
     http.await??;
+    updates.await?;
     streams.await?;
     jobs.await?;
     schedule.await?;

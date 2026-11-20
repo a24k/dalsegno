@@ -330,3 +330,16 @@ of days is first tagged `vX.Y.0-rc.N`, which moves neither `latest` nor the rele
 run happens on that, so the release is what was run. A new database schema raises at least the
 minor version, as migrations only go forward and an older build refuses a newer database, so going
 back over one needs the database as it was. Back it up before such an update.
+
+### D-33 Live updates come from reading the database
+
+Jobs, streams and changes are written from many places in `app` and `store`, by the runner, the
+supervisors and the analysis, and a write that forgot to announce itself would leave a screen
+silently stale.
+
+**Decision.** One watcher in `server` reads what the list endpoints show, once a second, and
+publishes what differs from its last reading as SSE events whose data is the same object the list
+returns. It reads even with no page subscribed, so a page that subscribes and then fetches misses
+nothing in between. Events have no history: a page refetches whenever its connection opens, and
+when the service tells it that it fell behind a bounded buffer, so a slow page never holds up the
+service. Updates arrive within about a second, which suits screens a person watches.

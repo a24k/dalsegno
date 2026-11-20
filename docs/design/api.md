@@ -41,7 +41,10 @@
 | Diagnostics | `GET /doctor` | `dalsegno doctor` |
 | Events | `GET /events` (SSE) | n/a |
 
-SSE events are `job.progress`, `stream.state`, `change.updated`.
+SSE events are `job.progress`, `stream.state`, `change.updated` (D-33). Each one's `data` is
+the object the jobs, streams or changes list returns for that ID, sent when it is new or
+differs, within about a second. A `resync` event tells a page that fell behind to refetch, as
+it does whenever its connection opens; the Web UI reconnects with a backoff from 1 s to 30 s.
 
 ## CLI
 
