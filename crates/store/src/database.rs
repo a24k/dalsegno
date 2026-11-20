@@ -29,10 +29,20 @@ pub enum StoreError {
     BrokenReference(String),
 }
 
+/// The schema version a database had when it was opened, and the one it has now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Schema {
+    /// The version found, which is 0 for a database that was just created.
+    pub found: i64,
+    /// The version after the pending migrations ran.
+    pub now: i64,
+}
+
 /// One open database.
 #[derive(Debug)]
 pub struct Database {
     pub(crate) connection: Connection,
+    schema: Schema,
 }
 
 impl Database {
@@ -54,9 +64,14 @@ impl Database {
         // A migration may rebuild a table that others refer to, which SQLite allows only with
         // foreign keys off; the check after each one makes up for that.
         connection.pragma_update(None, "foreign_keys", "OFF")?;
-        migrate(&mut connection)?;
+        let schema = migrate(&mut connection)?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
-        Ok(Self { connection })
+        Ok(Self { connection, schema })
+    }
+
+    /// Returns the schema version found at open and the one left.
+    pub fn schema(&self) -> Schema {
+        self.schema
     }
 
     /// Returns the connection, for statements no repository covers yet.
@@ -76,7 +91,7 @@ impl Database {
     }
 }
 
-fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
+fn migrate(connection: &mut Connection) -> Result<Schema, StoreError> {
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version > MIGRATION_COUNT {
         return Err(StoreError::TooNew(version));
@@ -88,7 +103,10 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
         check_foreign_keys(&transaction)?;
         transaction.commit()?;
     }
-    Ok(())
+    Ok(Schema {
+        found: version,
+        now: MIGRATION_COUNT,
+    })
 }
 
 fn check_foreign_keys(connection: &Connection) -> Result<(), StoreError> {
@@ -117,6 +135,38 @@ mod tests {
         let database = Database::open_in_memory().unwrap();
 
         assert_eq!(version(&database), MIGRATION_COUNT);
+    }
+
+    #[test]
+    fn a_new_file_reports_the_versions_it_migrated_between() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let database = Database::open(&dir.path().join("test.sqlite3")).unwrap();
+
+        assert_eq!(
+            database.schema(),
+            Schema {
+                found: 0,
+                now: MIGRATION_COUNT
+            }
+        );
+    }
+
+    #[test]
+    fn a_reopened_file_reports_the_same_version_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sqlite3");
+        Database::open(&path).unwrap();
+
+        let database = Database::open(&path).unwrap();
+
+        assert_eq!(
+            database.schema(),
+            Schema {
+                found: MIGRATION_COUNT,
+                now: MIGRATION_COUNT
+            }
+        );
     }
 
     #[test]
