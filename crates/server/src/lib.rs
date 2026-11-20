@@ -25,6 +25,7 @@ pub mod notifier;
 pub mod runner;
 pub mod scheduler;
 pub mod supervisor;
+mod ui;
 
 /// The real adapters behind the jobs and the follow tasks.
 #[derive(Debug, Clone)]
