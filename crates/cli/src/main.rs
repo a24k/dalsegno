@@ -16,13 +16,12 @@ use remote::JobRequest;
 use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
-use text::{
-    candidates_text, cut_text, diff_text, period_text, publish_text, refine_text, scan_text,
-};
+use text::{candidates_text, cut_text, diff_text, period_text, publish_text, scan_text};
 use tracing_subscriber::filter::LevelFilter;
 
 mod catalog;
 mod changes;
+mod editor;
 mod remote;
 mod text;
 
@@ -247,16 +246,10 @@ enum Command {
         #[arg(long)]
         time: f64,
     },
-    /// Measure the period from black at a boundary and one cycle later.
+    /// Show where a draft clip's edges could go, and the period of a cycle.
     Refine {
-        /// Video ID or URL.
-        stream: String,
-        /// Stream time of the boundary, in seconds.
-        #[arg(long)]
-        boundary: f64,
-        /// The period from audio, in seconds.
-        #[arg(long)]
-        period: f64,
+        /// Clip ID.
+        clip: i64,
     },
     /// Write the finished folder of a cut in the work area.
     Cut {
@@ -526,6 +519,7 @@ async fn run_remote(command: Command, url: &str, json: bool) -> anyhow::Result<O
             };
             changes::clip(&client()?, &action, json).await?;
         }
+        Command::Refine { clip } => editor::refine(&client()?, clip, json).await?,
         Command::Fetch {
             stream,
             itag,
@@ -612,17 +606,6 @@ async fn main() -> anyhow::Result<()> {
                 .candidates(&library()?, &tools, &stream, time)
                 .await?;
             print_report(cli.json, &report, candidates_text)
-        }
-        Command::Refine {
-            stream,
-            boundary,
-            period,
-        } => {
-            let tools = find_tools()?;
-            let report = acquisition
-                .refine(&library()?, &tools, &stream, boundary, period)
-                .await?;
-            print_report(cli.json, &report, refine_text)
         }
         Command::Cut {
             stream,
@@ -712,7 +695,8 @@ async fn main() -> anyhow::Result<()> {
         | Command::Diff { .. }
         | Command::Dismiss { .. }
         | Command::Clip { .. }
-        | Command::Fetch { .. } => Ok(()),
+        | Command::Fetch { .. }
+        | Command::Refine { .. } => Ok(()),
     }
 }
 

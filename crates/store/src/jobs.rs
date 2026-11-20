@@ -174,6 +174,19 @@ impl Database {
         Ok((added > 0).then(|| self.connection.last_insert_rowid()))
     }
 
+    /// Returns the job of this kind and target that is waiting or running, if there is one.
+    pub fn active_job(&self, kind: &str, target: &str) -> Result<Option<JobRow>, StoreError> {
+        let sql = format!(
+            "SELECT {COLUMNS} FROM jobs WHERE kind = ?1 AND target = ?2 \
+             AND state IN ('queued', 'running') ORDER BY id LIMIT 1"
+        );
+        self.connection
+            .query_row(&sql, params![kind, target], read_job)
+            .optional()?
+            .map(checked)
+            .transpose()
+    }
+
     /// Takes the oldest waiting job of a class.
     pub fn claim_job(&self, class: JobClass, now: i64) -> Result<Option<JobRow>, StoreError> {
         let id: Option<i64> = self
@@ -301,6 +314,22 @@ mod tests {
         database.enqueue_job(&job(kind, JobClass::Cpu), 0).unwrap();
         let claimed = database.claim_job(JobClass::Cpu, 0).unwrap().unwrap();
         database.finish_job(claimed.id, outcome, at).unwrap();
+    }
+
+    #[test]
+    fn an_active_job_is_found_by_kind_and_target_until_it_finishes() {
+        let database = database();
+        let queued = job("candidates", JobClass::Ffmpeg);
+        let id = database.enqueue_job(&queued, 0).unwrap();
+
+        let waiting = database.active_job("candidates", "{}").unwrap();
+        let other = database.active_job("candidates", "[]").unwrap();
+        database.claim_job(JobClass::Ffmpeg, 1).unwrap();
+        database.finish_job(id, Ok(()), 2).unwrap();
+        let done = database.active_job("candidates", "{}").unwrap();
+
+        assert_eq!(waiting.map(|row| row.id), Some(id));
+        assert_eq!((other, done), (None, None));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! The tool proposes and a person decides (G3), so candidates are ranked and none is chosen.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// How far before a black or silent stretch a keyframe still counts for it, in seconds.
 const KEYFRAME_LEAD_SECONDS: f64 = 5.0;
@@ -18,7 +18,7 @@ const RETURN_LEAD_SECONDS: f64 = 0.1;
 const END_OF_AUDIO_MARGIN_SECONDS: f64 = 0.25;
 
 /// A stretch of a detector's output.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Interval {
     /// Start, in seconds.
     pub start: f64,
@@ -73,7 +73,7 @@ fn number_after(line: &str, key: &str) -> Option<f64> {
 }
 
 /// What a candidate rests on. Black or silence alone is often part of a song.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Evidence {
     /// Black and silence overlap.
@@ -85,7 +85,7 @@ pub enum Evidence {
 }
 
 /// A fragment start, which is a keyframe (D-06).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe {
     /// Fragment number.
     pub sq: u64,
@@ -94,7 +94,7 @@ pub struct Keyframe {
 }
 
 /// A place a cut can start.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct StartCandidate {
     /// The keyframe to start from.
     pub keyframe: Keyframe,
@@ -105,7 +105,7 @@ pub struct StartCandidate {
 }
 
 /// Which edge of a silence an end sits on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EndEdge {
     /// The sound stops, which is the end of most pieces.
@@ -115,7 +115,7 @@ pub enum EndEdge {
 }
 
 /// A place a cut can end, which may be any frame.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct EndCandidate {
     /// Stream time.
     pub time: f64,
@@ -223,7 +223,7 @@ pub fn end_candidates(
 }
 
 /// The period from black at a boundary and one cycle later.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RefinedPeriod {
     /// Period, in seconds.
     pub period: f64,

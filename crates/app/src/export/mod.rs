@@ -2,6 +2,7 @@
 
 mod candidates;
 mod cut;
+mod editor;
 mod publish;
 #[cfg(test)]
 mod tests;
@@ -12,6 +13,10 @@ pub use dalsegno_core::export::{DEFAULT_SUFFIX, DEFAULT_TEMPLATE, ExportKind};
 pub use dalsegno_core::redact::Redacted;
 pub use dalsegno_io::transfer::Ownership;
 pub use dalsegno_store::programs::NewProgram;
+pub use editor::{
+    CANDIDATES, CandidatesTarget, Edge, EdgeFile, EdgeReport, EditorState, PeriodReport,
+    STALE_MARGIN_SECONDS, Window, editor_state, is_edge_current, is_period_current,
+};
 pub use publish::{PlexTarget, PublishReport, PublishRequest};
 
 use crate::acquisition::{Acquisition, Library};

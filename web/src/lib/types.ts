@@ -194,3 +194,70 @@ export function byDeadline(changes: readonly Change[], now: number): ByDeadline 
       .sort((a, b) => (b.dvr_deadline_at ?? 0) - (a.dvr_deadline_at ?? 0)),
   }
 }
+
+/** A stretch of stream time, in seconds. */
+export interface Interval {
+  start: number
+  end: number
+}
+
+/** A fragment start, which is a keyframe. */
+export interface Keyframe {
+  sq: number
+  time: number
+}
+
+/** What a boundary candidate rests on. */
+export type Evidence = 'both' | 'black_only' | 'silence_only'
+
+/** A keyframe a cut can start from. */
+export interface StartCandidate {
+  keyframe: Keyframe
+  evidence: Evidence
+  interval: Interval
+}
+
+/** A time a cut can end at, on one edge of a silence. */
+export interface EndCandidate {
+  time: number
+  edge: 'sound_stops' | 'sound_returns'
+  evidence: Evidence
+}
+
+/** What the candidates job found around one edge of a clip. Times are stream seconds. */
+export interface EdgeReport {
+  around: number
+  /** The stream time the preview and the sheet cover. */
+  window: Interval
+  /** The stream time of the preview's first frame. */
+  preview_start: number
+  keyframes: Keyframe[]
+  black: Interval[]
+  silence: Interval[]
+  starts: StartCandidate[]
+  ends: EndCandidate[]
+  relaxed: boolean
+}
+
+/** The period of a cycle clip as measured from black at its start. */
+export interface RefinedPeriod {
+  period: number
+  agreeing: number
+}
+
+export interface MeasuredPeriod {
+  start: number
+  audio: number
+  video: RefinedPeriod | null
+}
+
+/** What `GET /clips/{id}/candidates` answers, with the job when it is still being found. */
+export interface ClipCandidates {
+  clip: Clip
+  start: EdgeReport | null
+  end: EdgeReport | null
+  period: MeasuredPeriod | null
+  job: Job | null
+}
+
+export type Edge = 'start' | 'end'

@@ -53,6 +53,20 @@ fn checked_span(start: f64, end: f64) -> Result<(), AcquireError> {
     check_span(start, end).map_err(AcquireError::InvalidRequest)
 }
 
+/// Moves a start back to where the stored audio fragment holding it begins. Video and audio
+/// fragments of one `sq` start together, so that is the keyframe the cut starts from (D-06).
+fn snapped_start(database: &Database, stream_id: i64, start: f64) -> Result<f64, AcquireError> {
+    let stream = database
+        .stream(stream_id)?
+        .ok_or(AcquireError::NotFound("stream"))?;
+    let row = database
+        .fragment_row_at_time(stream_id, stream.stream.audio_itag, start)?
+        .ok_or(AcquireError::InvalidRequest(
+            "no stored audio places this time",
+        ))?;
+    Ok(row.stream_time)
+}
+
 fn read(database: &Database, id: i64) -> Result<ClipStatus, AcquireError> {
     database
         .clip_status(id)?
@@ -79,7 +93,7 @@ pub fn create_clip(database: &Database, request: &ClipRequest) -> Result<ClipSta
         change_id: change.id,
         version_id: request.version_id,
         stream_id: change.stream_id,
-        start: request.start,
+        start: snapped_start(database, change.stream_id, request.start)?,
         end: request.end,
     })?;
     read(database, id)
@@ -99,6 +113,7 @@ pub fn edit_clip(
     let start = edit.start.or(clip.start).unwrap_or_default();
     let end = edit.end.or(clip.end).unwrap_or_default();
     checked_span(start, end)?;
+    let start = snapped_start(database, clip.stream_id, start)?;
     if !database.update_draft(id, kind, start, end)? {
         return Err(AcquireError::InvalidRequest("the clip has been exported"));
     }
@@ -121,11 +136,13 @@ pub fn dismiss_change(database: &Database, id: i64, now_ms: i64) -> Result<(), A
 mod tests {
     use super::*;
     use dalsegno_store::changes::{NewChange, NewVersion};
+    use dalsegno_store::fragments::FragmentRow;
     use dalsegno_store::programs::NewProgram;
     use dalsegno_store::retention::{HoldOwner, NewHold};
     use dalsegno_store::streams::NewStream;
 
-    /// A database with one provisional change, and its old version.
+    /// A database with one provisional change, and its old version. The stream's audio has a
+    /// fragment every 5 s from 5.0 to 500.0.
     fn database() -> (Database, i64, i64) {
         let database = Database::open_in_memory().unwrap();
         let stream = database
@@ -141,6 +158,19 @@ mod tests {
                 registered_at: 0,
             })
             .unwrap();
+        for sq in 1..=100 {
+            database
+                .put_fragment(&FragmentRow {
+                    stream_id: stream,
+                    itag: 140,
+                    sq,
+                    stream_time: sq as f64 * 5.0,
+                    duration: 5.0,
+                    size: 1,
+                    fetched_at: 0,
+                })
+                .unwrap();
+        }
         let program = database
             .insert_program(&NewProgram {
                 short_name: "Example TV".to_string(),
@@ -222,6 +252,69 @@ mod tests {
                 Some(400.0)
             )
         );
+    }
+
+    #[test]
+    fn a_start_inside_a_fragment_moves_to_the_fragments_start() {
+        let (database, change, _) = database();
+
+        let clip = create_clip(
+            &database,
+            &ClipRequest {
+                start: 102.5,
+                ..request(change)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(clip.start, Some(100.0));
+    }
+
+    #[test]
+    fn a_start_on_a_fragment_start_stays() {
+        let (database, change, _) = database();
+
+        let clip = create_clip(&database, &request(change)).unwrap();
+
+        assert_eq!((clip.start, clip.end), (Some(100.0), Some(400.0)));
+    }
+
+    #[test]
+    fn a_start_with_no_stored_audio_is_refused() {
+        let (database, change, _) = database();
+
+        let error = create_clip(
+            &database,
+            &ClipRequest {
+                start: 2.0,
+                ..request(change)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            message(error),
+            "invalid request: no stored audio places this time"
+        );
+    }
+
+    #[test]
+    fn an_edited_start_moves_to_the_fragments_start_and_the_end_stays() {
+        let (database, change, _) = database();
+        let id = create_clip(&database, &request(change)).unwrap().id;
+
+        let clip = edit_clip(
+            &database,
+            id,
+            &ClipEdit {
+                start: Some(237.9),
+                end: Some(301.3),
+                ..ClipEdit::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!((clip.start, clip.end), (Some(235.0), Some(301.3)));
     }
 
     #[test]

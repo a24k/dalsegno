@@ -13,6 +13,7 @@ use tokio::process::Command;
 const DETECT_TIMEOUT: Duration = Duration::from_secs(1800);
 const ASSEMBLE_TIMEOUT: Duration = Duration::from_secs(3600);
 const FRAME_TIMEOUT: Duration = Duration::from_secs(600);
+const PREVIEW_TIMEOUT: Duration = Duration::from_secs(1800);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 /// ffmpeg's complaint about concatenated WebM, which is expected.
 const EXPECTED_WARNING: &str = "unknown-length element";
@@ -179,6 +180,25 @@ impl Ffmpeg {
         run(&self.ffmpeg, &args, FRAME_TIMEOUT).await.map(|_| ())
     }
 
+    /// Encodes a small H.264 and AAC preview that a browser plays, from the two joined tracks.
+    /// It is written under a temporary name and renamed, so a reader never sees half a file.
+    pub async fn preview(
+        &self,
+        video: &Path,
+        audio: &Path,
+        output: &Path,
+    ) -> Result<(), ToolError> {
+        let partial = output.with_extension("partial.mp4");
+        let args = preview_args(video, audio, &partial);
+        let done = run(&self.ffmpeg, &args, PREVIEW_TIMEOUT).await;
+        if done.is_err() {
+            let _ = std::fs::remove_file(&partial);
+        }
+        done?;
+        std::fs::rename(&partial, output)
+            .map_err(|error| ToolError::Failed(format!("the preview was not moved: {error}")))
+    }
+
     /// Reads the facts that export verifies.
     pub async fn probe(&self, file: &Path) -> Result<MediaFacts, ToolError> {
         let args = args_of([
@@ -212,6 +232,41 @@ fn detection_args(file: &Path, flag: &str, filter: &str, other_track: &str) -> V
         "-f".into(),
         "null".into(),
         "-".into(),
+    ])
+}
+
+fn preview_args(video: &Path, audio: &Path, output: &Path) -> Vec<OsString> {
+    args_of([
+        "-v".into(),
+        "error".into(),
+        "-y".into(),
+        "-i".into(),
+        video.into(),
+        "-i".into(),
+        audio.into(),
+        "-map".into(),
+        "0:v:0".into(),
+        "-map".into(),
+        "1:a:0".into(),
+        "-map_metadata".into(),
+        "-1".into(),
+        "-c:v".into(),
+        "libx264".into(),
+        "-preset".into(),
+        "veryfast".into(),
+        "-crf".into(),
+        "26".into(),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+        "-vf".into(),
+        "scale=-2:'min(720,ih)'".into(),
+        "-c:a".into(),
+        "aac".into(),
+        "-b:a".into(),
+        "128k".into(),
+        "-movflags".into(),
+        "+faststart".into(),
+        output.into(),
     ])
 }
 
@@ -404,6 +459,26 @@ mod tests {
         let args = strings(&assembly_args(&job()));
 
         assert_eq!(args.last().unwrap(), "/work/out.mp4");
+    }
+
+    #[test]
+    fn the_preview_is_h264_without_the_sources_metadata() {
+        let args = strings(&preview_args(
+            Path::new("/work/video.webm"),
+            Path::new("/work/audio.m4a"),
+            Path::new("/work/preview.partial.mp4"),
+        ));
+
+        let pair = |flag: &str, value: &str| {
+            args.windows(2)
+                .any(|pair| pair[0] == flag && pair[1] == value)
+        };
+        assert!(pair("-map_metadata", "-1"));
+        assert!(pair("-c:v", "libx264"));
+        assert!(pair("-pix_fmt", "yuv420p"));
+        assert!(pair("-movflags", "+faststart"));
+        assert_eq!(args.last().unwrap(), "/work/preview.partial.mp4");
+        assert!(!args.iter().any(|arg| arg.contains("http")));
     }
 
     #[test]

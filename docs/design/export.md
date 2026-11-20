@@ -17,7 +17,8 @@ For a region `[a, b]`:
    inside or just before an overlap. End candidates are `silence_start` positions, and
    just before each `silence_end`, for a piece that closes in silence (D-31).
 5. If known material directly precedes the region, favour the start candidates at its end.
-6. Generate the contact sheet and H.264 preview, at low priority.
+6. The `candidates` job writes, for each edge of a draft clip, the report, an H.264 preview
+   and the contact sheet, at low priority. The edge is redone when it moves more than 15 s from where it was examined.
 
 Detection results are cached per region and shown as seek-bar marks. The tool never picks
 one on its own (G3).

@@ -10,6 +10,7 @@ use crate::catalog::{
 use crate::changes::{
     change_detail, change_diff, clip_detail, create_clip, dismiss_change, patch_clip,
 };
+use crate::editor::{clip_candidates, clip_preview, clip_sheet};
 use crate::events::{CAPACITY, EventBus};
 use crate::known::{add_known_clip, list_known_clips, remove_known_clip};
 use crate::operations::{create_job, doctor, get_settings, put_settings};
@@ -384,6 +385,20 @@ async fn list_jobs(
     .await
 }
 
+async fn get_job(
+    State(state): State<ApiState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Envelope>, ApiError> {
+    with_database(&state.database, move |database| {
+        let job = database
+            .job(id)
+            .map_err(store_error)?
+            .ok_or_else(ApiError::not_found)?;
+        Ok(ok(job_json(&job)))
+    })
+    .await
+}
+
 async fn cancel_job(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
@@ -518,7 +533,11 @@ pub fn router(state: ApiState) -> Router {
         .route("/changes/{id}/dismiss", post(dismiss_change))
         .route("/clips", post(create_clip))
         .route("/clips/{id}", get(clip_detail).patch(patch_clip))
+        .route("/clips/{id}/candidates", get(clip_candidates))
+        .route("/clips/{id}/preview", get(clip_preview))
+        .route("/clips/{id}/sheet", get(clip_sheet))
         .route("/jobs", get(list_jobs).post(create_job))
+        .route("/jobs/{id}", get(get_job))
         .route("/jobs/{id}/cancel", post(cancel_job))
         .route("/settings", get(get_settings).put(put_settings))
         .route("/doctor", get(doctor))

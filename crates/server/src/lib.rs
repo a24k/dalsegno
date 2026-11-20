@@ -4,6 +4,7 @@ use api::{ApiState, Services, router};
 use dalsegno_app::acquisition::{Acquisition, AcquisitionOptions, FetchRequest, IpPolicy, Library};
 use dalsegno_app::backfill::DEFAULT_HOURS;
 use dalsegno_app::config::Config;
+use dalsegno_app::export::{CANDIDATES, CandidatesTarget, find_tools};
 use dalsegno_app::fetch::FetchLimits;
 use dalsegno_app::lifecycle::{
     ANALYSIS, BACKFILL, FEATURES, FETCH, FetchTarget, PREFETCH, PrefetchTarget, StreamTarget,
@@ -24,6 +25,7 @@ use tokio::sync::watch;
 pub mod api;
 mod catalog;
 mod changes;
+mod editor;
 pub mod events;
 mod known;
 pub mod notifier;
@@ -55,6 +57,15 @@ impl Service {
         if kind == PREFETCH {
             let target = PrefetchTarget::parse(&job.job.target).ok_or_else(invalid)?;
             let done = self.acquisition.prefetch(&self.library, &target).await;
+            return done.map_err(|error| error.to_string());
+        }
+        if kind == CANDIDATES {
+            let target = CandidatesTarget::parse(&job.job.target).ok_or_else(invalid)?;
+            let tools = find_tools().map_err(|error| error.to_string())?;
+            let done = self
+                .acquisition
+                .prepare_editor(&self.library, &tools, target.clip)
+                .await;
             return done.map_err(|error| error.to_string());
         }
         let target = StreamTarget::parse(&job.job.target).ok_or_else(invalid)?;

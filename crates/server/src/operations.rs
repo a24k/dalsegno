@@ -318,6 +318,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_job_is_shown_by_its_id() {
+        let fixture = fixture();
+        let (_, queued) =
+            with_body(&fixture, "POST", "/api/v1/jobs", json!({ "kind": "sweep" })).await;
+        let id = queued["data"]["id"].as_i64().unwrap();
+
+        let (status, body) = get_json(&fixture, &format!("/api/v1/jobs/{id}")).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["id"], id);
+        assert_eq!(body["data"]["kind"], "sweep");
+        assert_eq!(body["data"]["state"], "queued");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_job_is_not_found() {
+        let fixture = fixture();
+
+        let (status, body) = get_json(&fixture, "/api/v1/jobs/999").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
     async fn a_job_that_cannot_run_is_refused() {
         let fixture = fixture();
         let stream = fixture.stream;

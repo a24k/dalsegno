@@ -37,7 +37,7 @@
 | Contact sheet | `GET /clips/{id}/sheet` | n/a |
 | Export, transfer | `POST /clips/{id}/export` | `dalsegno cut`, `publish` |
 | Known material | `GET`, `POST /programs/{id}/known-clips`, `DELETE /programs/{id}/known-clips/{clip}` | `dalsegno known` |
-| Jobs | `GET`, `POST /jobs`, `POST /jobs/{id}/cancel` | `dalsegno jobs`, `fetch` |
+| Jobs | `GET`, `POST /jobs`, `GET /jobs/{id}`, `POST /jobs/{id}/cancel` | `dalsegno jobs`, `fetch` |
 | Settings | `GET`, `PUT /settings` | `dalsegno set` |
 | Diagnostics | `GET /doctor` | `dalsegno doctor` |
 | Events | `GET /events` (SSE) | n/a |
@@ -82,9 +82,26 @@ the change as `GET` does and lets its holds lapse 7 days later; a change already
 optionally `version`, which must be the change's old or new version, and answers `201` with the
 clip; a cut must start at 0 or later, end after it starts and last at most 7 days, and an
 unknown change is a `404`. `PATCH /clips/{id}` takes any of `kind`, `start` and `end`, and is
-refused with `409` once the clip is exported. A clip shows `id`, `state` (`draft` or
+refused with `409` once the clip is exported. A `start` moves back to the keyframe that begins
+the stored audio fragment holding it (D-06), and a `start` with no stored audio is a `409`; an
+`end` is stored as given. A clip shows `id`, `state` (`draft` or
 `exported`), `kind`, `change_id`, `version_id`, `stream_id`, `start`, `end`, `name`,
 `duration`, `output_path` and `plex_status`.
+
+`GET /clips/{id}/candidates` gives `clip`, and for each edge, `start` and `end`, a report with
+the `window` of stream time its files cover, the `preview_start` of the preview's first frame,
+the `keyframes`, the `black` and `silence` intervals, the `starts` and `ends` candidates best
+first and whether detection was `relaxed`; a cycle clip also has its measured `period`. All
+times are stream time, and nothing names a path or URL. A report is shown only while its edge
+stays within 15 s of where it was examined; the job centres its work on the edge, so this holds
+even where the stored data ends. When a draft lacks a current report, or a
+cycle lacks its period, the call queues the `candidates` job, or finds the one already waiting,
+and answers `202` with the same body and the job in `job`; the caller asks again once the job
+has finished. Otherwise it answers `200` with `job` null, and an exported clip always does and
+queues nothing. `GET /clips/{id}/preview?edge=start|end` serves that edge's H.264 preview as
+`video/mp4` with `Range` requests (a single range of `a-b`, `a-` or `-n` gives `206`, one past
+the end `416`), and `GET /clips/{id}/sheet?edge=start|end` its contact sheet as `image/jpeg`.
+A bad `edge` is a `400`, and an edge without a current file a `404`.
 
 `GET /settings` gives each operational setting with its `value`, the `default` from the file,
 environment or flags, and whether it is `overridden`, and the bootstrap values with secrets and
@@ -119,6 +136,7 @@ dalsegno diff     <change>
 dalsegno dismiss  <change>
 dalsegno clip     --change <change> --kind <cycle|addition> --from <s> --to <s> [--version <v>]
 dalsegno clip     <clip> [--kind <k>] [--from <s>] [--to <s>]
+dalsegno refine   <clip>
 dalsegno doctor   [--stream <id>]
 dalsegno set      [<key>=<value>]... [--reset <key>]...
 dalsegno set      --stream <id> title=<title>
@@ -137,7 +155,9 @@ which cannot go with `--reset`. `program` changes the program a stream has, or m
 links it, and `known` lists a program's known clips. `diff` shows a change's two bars, each from
 the start of its cycle, with the video boundaries and the checks, and `dismiss` closes the
 change. `clip` starts a draft from a change, or shows a clip, or reshapes a draft when given
-`--kind`, `--from` or `--to`.
+`--kind`, `--from` or `--to`. `refine` asks for a draft clip's boundary candidates, waits for the
+`candidates` job when the service has to make them (it follows the job every 2 s, for at most
+30 minutes), and shows each edge's candidates best first and, for a cycle, the measured period.
 
 A running job that reports progress shows its share done and, from its pace so far, about how
 long is left. So far only backfill reports, after each 500 fragments, and the API returns it as
@@ -165,7 +185,6 @@ Until milestone 5 these commands run in process (D-17) and need `--data-dir` or
 
 ```text
 dalsegno candidates <id> --time <s>
-dalsegno refine     <id> --boundary <s> --period <s>
 dalsegno cut        <id> --kind <kind> --start-sq <sq> --duration <s> --named-at <unix>
 dalsegno publish    <clip> --library <dir>
 ```
