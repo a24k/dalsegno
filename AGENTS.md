@@ -19,6 +19,13 @@ from the issues of the current milestone.
 - **Releases follow D-32.** The tag matches the version in `Cargo.toml`, and a milestone's run
   happens on a `-rc.N` first.
 
+## Web UI
+
+`web/` is a Svelte SPA (D-18) that the `server` crate embeds from `web/dist`. To work on it,
+run `dalsegno serve` and then `npm run dev` in `web/`: Vite serves the pages and sends `/api`
+to `127.0.0.1:8737`, or to `DALSEGNO_API`. A debug build reads `web/dist` from disk, so
+`npm run build` is enough to see the change at the service's own address.
+
 ## Checks
 
 The same as CI:
@@ -29,6 +36,21 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo llvm-cov --workspace --ignore-filename-regex 'crates/cli/' --summary-only
 ```
+
+For `web/`, from that directory, after `npm ci`:
+
+```sh
+npm run lint
+npm run check
+npm test
+npm run build
+cargo build --package dalsegno
+npm run e2e
+```
+
+`npm run e2e` starts `target/debug/dalsegno serve` on a temporary data directory, with no
+`DALSEGNO_*` setting or config file of your own; `npx playwright install chromium` fetches
+its browser once.
 
 Run them one at a time and stop at the first failure. Never chain checks with commit, push and PR
 in one command, so a failure cannot slip through to a PR.
