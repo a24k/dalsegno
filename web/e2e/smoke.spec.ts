@@ -27,3 +27,8 @@ test('reaches the navigation from the keyboard', async ({ page }) => {
   await page.keyboard.press('Tab')
   await expect(page.getByRole('link', { name: 'dalsegno' })).toBeFocused()
 })
+
+test('connects for live updates', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('status')).toHaveText('Live updates on')
+})

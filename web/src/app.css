@@ -83,3 +83,9 @@ nav a[aria-current='page'] {
 main {
   padding: 1rem;
 }
+
+.live {
+  margin: 0 0 0 auto;
+  color: var(--muted);
+  font-size: 0.875rem;
+}

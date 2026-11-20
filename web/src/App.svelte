@@ -1,5 +1,6 @@
 <script lang="ts">
   import Placeholder from './lib/Placeholder.svelte'
+  import { live } from './lib/live.svelte'
   import { followLink, router } from './lib/router.svelte'
   import type { Screen } from './lib/routes'
 
@@ -50,6 +51,9 @@
       {/each}
     </ul>
   </nav>
+  <p class="live" role="status" data-connected={live.isConnected}>
+    {live.isConnected ? 'Live updates on' : 'Live updates paused, reconnecting'}
+  </p>
 </header>
 <main id="main" tabindex="-1">
   {#key router.path}
