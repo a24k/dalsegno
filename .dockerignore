@@ -2,3 +2,8 @@
 !Cargo.toml
 !Cargo.lock
 !crates
+!web
+web/node_modules
+web/dist
+web/playwright-report
+web/test-results
