@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { expect, test } from '@playwright/test'
 
 // The service starts on an empty data directory, so there are no streams or changes, and the
@@ -80,4 +82,22 @@ test('a stream that does not exist is not found', async ({ page }) => {
   await page.goto('/streams/9999')
 
   await expect(page.getByRole('heading', { level: 1, name: 'Not found' })).toBeVisible()
+})
+
+test('a change that does not exist is not found', async ({ page }) => {
+  await page.goto('/changes/1')
+
+  await expect(page.getByRole('heading', { level: 1, name: 'Not found' })).toBeVisible()
+  await expect(page.getByText('There is no such change.')).toBeVisible()
+})
+
+test('the header shows the version of the running service', async ({ page }) => {
+  const manifest = readFileSync(resolve(import.meta.dirname, '../../Cargo.toml'), 'utf8')
+  const workspace = manifest.split('[workspace.package]')[1] ?? ''
+  const version = /^version\s*=\s*"([^"]+)"/m.exec(workspace)?.[1]
+  expect(version).toBeDefined()
+
+  await page.goto('/')
+
+  await expect(page.locator('header .version')).toHaveText(version ?? '')
 })

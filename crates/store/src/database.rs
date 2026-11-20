@@ -1,13 +1,14 @@
 //! The SQLite connection and its migrations.
 
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use std::path::Path;
 use std::time::Duration;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
-const MIGRATIONS: [&str; 2] = [
+const MIGRATIONS: [&str; 3] = [
     include_str!("../migrations/0001_initial.sql"),
     include_str!("../migrations/0002_change_tracking.sql"),
+    include_str!("../migrations/0003_draft_clips.sql"),
 ];
 const MIGRATION_COUNT: i64 = MIGRATIONS.len() as i64;
 
@@ -23,6 +24,9 @@ pub enum StoreError {
     /// A row holds a value this program does not recognise.
     #[error("the database holds an invalid value: {0}")]
     Invalid(&'static str),
+    /// A migration left rows that point at nothing.
+    #[error("a migration broke a foreign key in table {0}")]
+    BrokenReference(String),
 }
 
 /// One open database.
@@ -47,8 +51,11 @@ impl Database {
     }
 
     fn prepare(mut connection: Connection) -> Result<Self, StoreError> {
-        connection.pragma_update(None, "foreign_keys", "ON")?;
+        // A migration may rebuild a table that others refer to, which SQLite allows only with
+        // foreign keys off; the check after each one makes up for that.
+        connection.pragma_update(None, "foreign_keys", "OFF")?;
         migrate(&mut connection)?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
         Ok(Self { connection })
     }
 
@@ -78,9 +85,20 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
         let transaction = connection.transaction()?;
         transaction.execute_batch(migration)?;
         transaction.pragma_update(None, "user_version", index as i64 + 1)?;
+        check_foreign_keys(&transaction)?;
         transaction.commit()?;
     }
     Ok(())
+}
+
+fn check_foreign_keys(connection: &Connection) -> Result<(), StoreError> {
+    let broken: Option<String> = connection
+        .query_row("PRAGMA foreign_key_check", [], |row| row.get(0))
+        .optional()?;
+    match broken {
+        Some(table) => Err(StoreError::BrokenReference(table)),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -179,5 +197,44 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn a_clip_and_its_hold_survive_the_draft_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.sqlite3");
+        let old = Connection::open(&path).unwrap();
+        for migration in &MIGRATIONS[..2] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", 2).unwrap();
+        old.execute_batch(
+            "INSERT INTO streams (id, video_id, title, state, video_itag, audio_itag,
+                                  fragment_len, registered_at)
+               VALUES (1, 'AAAAAAAAAAA', 'Example', 'registered', 248, 140, 5.0, 0);
+             INSERT INTO clips (id, name, kind, stream_id, video_itag, audio_itag, sq_first,
+                                sq_last, duration, metadata)
+               VALUES (7, 'Example', 'addition', 1, 248, 140, 10, 20, 50.0, '{}');
+             INSERT INTO retention_holds (stream_id, itag, sq_first, sq_last, clip_id)
+               VALUES (1, 248, 10, 20, 7);",
+        )
+        .unwrap();
+        drop(old);
+
+        let database = Database::open(&path).unwrap();
+
+        let (state, holds): (String, i64) = database
+            .connection()
+            .query_row(
+                "SELECT (SELECT state FROM clips WHERE id = 7),
+                        (SELECT COUNT(*) FROM retention_holds WHERE clip_id = 7)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (version(&database), state.as_str(), holds),
+            (3, "exported", 1)
+        );
     }
 }

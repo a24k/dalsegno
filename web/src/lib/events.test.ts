@@ -23,7 +23,12 @@ class FakeSource implements Source {
 function setUp() {
   const sources: FakeSource[] = []
   const waits: { run: () => void; ms: number; isCancelled: boolean }[] = []
-  const handlers: Handlers = { onEvent: vi.fn(), onResync: vi.fn(), onConnected: vi.fn() }
+  const handlers: Handlers = {
+    onEvent: vi.fn(),
+    onResync: vi.fn(),
+    onVersion: vi.fn(),
+    onConnected: vi.fn(),
+  }
   const disconnect = connect(handlers, {
     open: (url) => {
       expect(url).toBe(EVENTS_URL)
@@ -56,13 +61,13 @@ describe('backoff', () => {
 })
 
 describe('connect', () => {
-  test('refetches when the connection opens', () => {
+  test('reports the connection when it opens and leaves the refetch to the resync', () => {
     const { sources, handlers } = setUp()
 
     sources[0].onopen?.(new Event('open'))
 
     expect(handlers.onConnected).toHaveBeenCalledWith(true)
-    expect(handlers.onResync).toHaveBeenCalledOnce()
+    expect(handlers.onResync).not.toHaveBeenCalled()
   })
 
   test('hands each event over with its data', () => {
@@ -91,6 +96,26 @@ describe('connect', () => {
     sources[0].emit('resync', '{}')
 
     expect(handlers.onResync).toHaveBeenCalledOnce()
+  })
+
+  test('reads the version from the resync', () => {
+    const { sources, handlers } = setUp()
+
+    sources[0].emit('resync', '{"version":"0.6.0-rc.6"}')
+
+    expect(handlers.onVersion).toHaveBeenCalledWith('0.6.0-rc.6')
+    expect(handlers.onResync).toHaveBeenCalledOnce()
+  })
+
+  test('ignores a version that is missing or not a string', () => {
+    const { sources, handlers } = setUp()
+
+    sources[0].emit('resync', '{}')
+    sources[0].emit('resync', '{"version":6}')
+    sources[0].emit('resync', 'not json')
+
+    expect(handlers.onVersion).not.toHaveBeenCalled()
+    expect(handlers.onResync).toHaveBeenCalledTimes(3)
   })
 
   test('reconnects with a growing wait, and starts over once connected', () => {

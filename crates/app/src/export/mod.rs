@@ -26,6 +26,11 @@ use dalsegno_store::retention::{HoldOwner, NewHold};
 use dalsegno_store::streams::StreamRow;
 use std::sync::Arc;
 
+/// Longest cut, in seconds, far past any real cycle.
+pub const MAX_CLIP_SECONDS: f64 = 7.0 * 86_400.0;
+/// Holds last this long past the owner's close (`docs/design/data-model.md`).
+pub const HOLD_AFTER_CLOSE_MS: i64 = 7 * 24 * 3600 * 1000;
+
 /// Finds ffmpeg and ffprobe.
 pub fn find_tools() -> Result<Ffmpeg, AcquireError> {
     let find = |name: &str| {

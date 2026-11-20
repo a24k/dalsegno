@@ -17,7 +17,7 @@ test('opens the dashboard and moves between screens', async ({ page }) => {
 
 test('opens a screen straight from a link, as a notification does', async ({ page }) => {
   await page.goto('/changes/7')
-  await expect(page.getByRole('heading', { level: 1, name: 'Change' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 1, name: 'Not found' })).toBeVisible()
 })
 
 test('reaches the navigation from the keyboard', async ({ page }) => {

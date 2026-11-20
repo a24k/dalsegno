@@ -22,6 +22,7 @@ use text::{
 use tracing_subscriber::filter::LevelFilter;
 
 mod catalog;
+mod changes;
 mod remote;
 mod text;
 
@@ -330,23 +331,54 @@ enum Command {
         #[arg(long)]
         from: Option<f64>,
     },
-    /// Compare the last cycle of one envelope file with the last cycle of another.
+    /// Show both versions of a change from the service, or with --env compare the last cycle of
+    /// one envelope file with the last cycle of another.
     Diff {
+        /// Change ID, when asking the service.
+        #[arg(required_unless_present = "env", conflicts_with = "env")]
+        change: Option<i64>,
         /// Envelope of the current version.
-        #[arg(long)]
-        env: PathBuf,
+        #[arg(long, requires_all = ["period", "against", "against_period"])]
+        env: Option<PathBuf>,
         /// Period of the current version, in seconds.
-        #[arg(long)]
-        period: f64,
+        #[arg(long, requires = "env")]
+        period: Option<f64>,
         /// Envelope of the previous version.
-        #[arg(long)]
-        against: PathBuf,
+        #[arg(long, requires = "env")]
+        against: Option<PathBuf>,
         /// Period of the previous version, in seconds.
-        #[arg(long)]
-        against_period: f64,
+        #[arg(long, requires = "env")]
+        against_period: Option<f64>,
         /// Envelope of a recurring clip.
-        #[arg(long)]
+        #[arg(long, requires = "env")]
         known: Option<PathBuf>,
+    },
+    /// Close a change on your word. Its holds lapse after a week.
+    Dismiss {
+        /// Change ID.
+        change: i64,
+    },
+    /// Start a draft clip from a change, or show a clip, or with --kind, --from or --to reshape
+    /// a draft.
+    Clip {
+        /// Clip ID, to show or reshape.
+        #[arg(required_unless_present = "change", conflicts_with = "change")]
+        clip: Option<i64>,
+        /// Change to start a clip from.
+        #[arg(long, requires_all = ["kind", "from", "to"])]
+        change: Option<i64>,
+        /// What it holds.
+        #[arg(long, value_enum)]
+        kind: Option<changes::ClipKind>,
+        /// Stream time it starts, in seconds.
+        #[arg(long)]
+        from: Option<f64>,
+        /// Stream time it ends, in seconds.
+        #[arg(long)]
+        to: Option<f64>,
+        /// Version whose cycle the clip is cut from, when it is a cycle.
+        #[arg(long, requires = "change")]
+        version: Option<i64>,
     },
 }
 
@@ -460,6 +492,40 @@ async fn run_remote(command: Command, url: &str, json: bool) -> anyhow::Result<O
             remote::queue(&client()?, &request, json).await?;
         }
         Command::Sweep => remote::queue(&client()?, &JobRequest::Sweep, json).await?,
+        Command::Diff {
+            change: Some(change),
+            ..
+        } => changes::diff(&client()?, change, json).await?,
+        Command::Dismiss { change } => changes::dismiss(&client()?, change, json).await?,
+        Command::Clip {
+            clip,
+            change,
+            kind,
+            from,
+            to,
+            version,
+        } => {
+            let action = match (clip, change, kind, from, to) {
+                (None, Some(change), Some(kind), Some(from), Some(to)) => {
+                    changes::ClipAction::Create {
+                        change,
+                        kind,
+                        from,
+                        to,
+                        version,
+                    }
+                }
+                (Some(clip), _, None, None, None) => changes::ClipAction::Show(clip),
+                (Some(clip), _, kind, from, to) => changes::ClipAction::Edit {
+                    clip,
+                    kind,
+                    from,
+                    to,
+                },
+                _ => bail!("give a clip, or --change with --kind, --from and --to"),
+            };
+            changes::clip(&client()?, &action, json).await?;
+        }
         Command::Fetch {
             stream,
             itag,
@@ -625,7 +691,6 @@ async fn main() -> anyhow::Result<()> {
         Command::Envelope { .. }
         | Command::Period { .. }
         | Command::Scan { .. }
-        | Command::Diff { .. }
         | Command::Serve => Ok(()),
         // `run_remote` has already handled these.
         Command::Status
@@ -644,6 +709,9 @@ async fn main() -> anyhow::Result<()> {
         | Command::Backfill { .. }
         | Command::Features { .. }
         | Command::Sweep
+        | Command::Diff { .. }
+        | Command::Dismiss { .. }
+        | Command::Clip { .. }
         | Command::Fetch { .. } => Ok(()),
     }
 }
@@ -676,11 +744,12 @@ async fn run_offline(command: Command, json: bool) -> anyhow::Result<Option<Comm
                 print_report(json, &offline::scan(&env, period, from)?, scan_text)?;
             }
             Command::Diff {
-                env,
-                period,
-                against,
-                against_period,
+                env: Some(env),
+                period: Some(period),
+                against: Some(against),
+                against_period: Some(against_period),
                 known,
+                ..
             } => {
                 let request = DiffRequest {
                     current: env,

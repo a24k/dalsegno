@@ -3,6 +3,7 @@
 //! The database is locked to read and to write, and not during the CPU work between, so a pass
 //! never holds up following.
 
+use crate::comparison::old_cycle_start;
 use crate::error::AcquireError;
 use crate::fetch::{SharedDatabase, lock};
 use crate::lifecycle::{PrefetchTarget, ensure_program};
@@ -29,9 +30,6 @@ const HISTORY_SECONDS: f64 = 120.0 * 3600.0;
 const OVERLAP_SECONDS: f64 = 3600.0;
 /// A cycle counts as seen this long after it could have ended.
 const CYCLE_MARGIN_SECONDS: f64 = 600.0;
-/// The old cycle ends this long before a change, as comparison searches 10 minutes past a
-/// cycle's ends and must not find the new audio there. It loops, so any whole cycle will do.
-const OLD_CYCLE_CLEARANCE_SECONDS: f64 = 660.0;
 /// Net changes this close are one change.
 const DELTA_TOLERANCE: f64 = 5.0;
 /// Video is fetched this far either side of a change.
@@ -531,7 +529,7 @@ fn compare_cycles(
         return None;
     };
     let is_cycle_seen = data.end_time() >= change.last_signal_time + new + CYCLE_MARGIN_SECONDS;
-    let old_start = change.start_time - old.period - OLD_CYCLE_CLEARANCE_SECONDS;
+    let old_start = old_cycle_start(change.start_time, old.period);
     if !is_cycle_seen || old_start < data.time_of(0) {
         return None;
     }

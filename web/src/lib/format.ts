@@ -20,6 +20,13 @@ export function inJapan(ms: number): string {
   return `${parts.month}/${parts.day} ${parts.hour}:${parts.minute} JST`
 }
 
+/** A time left in minutes below an hour, else in whole hours. */
+function amountLeft(left: number): string {
+  return left < HOUR_MS
+    ? `${Math.max(1, Math.floor(left / MINUTE_MS))} min`
+    : `${Math.floor(left / HOUR_MS)} hours`
+}
+
 /**
  * The time left to export a change (D-23). A change with no deadline belongs to a version
  * still on air, whose sections come round again.
@@ -32,11 +39,25 @@ export function timeLeft(deadline: number | null, now: number): string {
   if (left <= 0) {
     return `Past the deadline of ${inJapan(deadline)}`
   }
-  const amount =
-    left < HOUR_MS
-      ? `${Math.max(1, Math.floor(left / MINUTE_MS))} min`
-      : `${Math.floor(left / HOUR_MS)} hours`
-  return `${amount} left, export by ${inJapan(deadline)}`
+  return `${amountLeft(left)} left, export by ${inJapan(deadline)}`
+}
+
+/** The DVR clock of a change that is still open, as its screen words it (D-23). */
+export function dvrClock(deadline: number, now: number): string {
+  const left = deadline - now
+  if (left <= 0) {
+    return 'The DVR deadline has passed'
+  }
+  return `Export the old version by ${inJapan(deadline)} (${amountLeft(left)} left)`
+}
+
+/** A span of stream time as `h:mm:ss`. */
+export function clock(seconds: number): string {
+  const whole = Math.max(0, Math.round(seconds))
+  const hours = Math.floor(whole / 3600)
+  const minutes = Math.floor((whole % 3600) / 60)
+  const rest = whole % 60
+  return `${hours}:${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`
 }
 
 /** How long ago something happened, in the largest whole unit. */

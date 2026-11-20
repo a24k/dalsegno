@@ -1,6 +1,7 @@
 //! Making the finished folder of a cut (FR-E4 to FR-E9, FR-E12). Streams are copied, never
 //! encoded (G4).
 
+use super::MAX_CLIP_SECONDS;
 use crate::acquisition::{Acquisition, Library};
 use crate::error::AcquireError;
 use crate::fetch::lock;
@@ -25,8 +26,6 @@ const DEFAULT_POSTER_SECONDS: f64 = 90.0;
 /// Fragments past the expected end, as fragments are not all one length. They are fetched only
 /// when the cut needs them, as they may not exist yet.
 const SPARE_FRAGMENTS: u64 = 2;
-/// Longest cut, in seconds, far past any real cycle.
-const MAX_CUT_SECONDS: f64 = 7.0 * 86_400.0;
 /// Thumbnails come from here. Anything else in a stored URL is not followed.
 const THUMBNAIL_HOST_SUFFIX: &str = ".ytimg.com";
 
@@ -382,7 +381,7 @@ fn prepare(
     program: &ProgramRow,
     row: &StreamRow,
 ) -> Result<(ExportName, Tags), AcquireError> {
-    if !(request.duration > 0.0 && request.duration <= MAX_CUT_SECONDS) {
+    if !(request.duration > 0.0 && request.duration <= MAX_CLIP_SECONDS) {
         return Err(AcquireError::InvalidRequest(
             "a cut's length is out of range",
         ));

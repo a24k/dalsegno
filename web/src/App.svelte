@@ -1,5 +1,6 @@
 <script lang="ts">
   import Placeholder from './lib/Placeholder.svelte'
+  import Change from './screens/Change.svelte'
   import Dashboard from './screens/Dashboard.svelte'
   import Jobs from './screens/Jobs.svelte'
   import Settings from './screens/Settings.svelte'
@@ -46,7 +47,10 @@
 
 <a class="skip" href="#main">Skip to content</a>
 <header>
-  <a class="brand" href="/">dalsegno</a>
+  <div class="identity">
+    <a class="brand" href="/">dalsegno</a>
+    {#if live.version}<span class="version">{live.version}</span>{/if}
+  </div>
   <nav aria-label="Main">
     <ul>
       {#each NAVIGATION as [path, label] (path)}
@@ -68,6 +72,8 @@
       <Streams />
     {:else if router.route.screen === 'stream'}
       <Stream />
+    {:else if router.route.screen === 'change'}
+      <Change />
     {:else if router.route.screen === 'jobs'}
       <Jobs />
     {:else if router.route.screen === 'settings'}

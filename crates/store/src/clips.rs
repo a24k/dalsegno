@@ -16,14 +16,16 @@ pub enum ClipKind {
 }
 
 impl ClipKind {
-    fn as_str(self) -> &'static str {
+    /// The name stored and shown.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Cycle => "cycle",
             Self::Addition => "addition",
         }
     }
 
-    fn parse(text: &str) -> Option<Self> {
+    /// Reads the stored name.
+    pub fn parse(text: &str) -> Option<Self> {
         match text {
             "cycle" => Some(Self::Cycle),
             "addition" => Some(Self::Addition),
@@ -46,7 +48,8 @@ pub enum PlexStatus {
 }
 
 impl PlexStatus {
-    fn as_str(self) -> &'static str {
+    /// The name stored and shown.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Requested => "requested",
@@ -102,6 +105,102 @@ pub struct ClipRow {
     pub output_path: Option<String>,
     /// Where it stands with Plex.
     pub plex_status: PlexStatus,
+}
+
+/// A clip still being shaped, before export.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NewDraft {
+    /// What it will hold.
+    pub kind: ClipKind,
+    /// The change it was chosen from.
+    pub change_id: i64,
+    /// The version it cuts, when it cuts one.
+    pub version_id: Option<i64>,
+    /// Stream.
+    pub stream_id: i64,
+    /// Start of the cut, in stream time.
+    pub start: f64,
+    /// End of the cut, in stream time.
+    pub end: f64,
+}
+
+/// Whether a clip has been exported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipState {
+    /// Still being shaped.
+    Draft,
+    /// Cut and written out.
+    Exported,
+}
+
+impl ClipState {
+    /// The name stored and shown.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Exported => "exported",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "draft" => Some(Self::Draft),
+            "exported" => Some(Self::Exported),
+            _ => None,
+        }
+    }
+}
+
+/// Any clip, as the operator sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipStatus {
+    /// Row ID.
+    pub id: i64,
+    /// Draft or exported.
+    pub state: ClipState,
+    /// What it holds.
+    pub kind: ClipKind,
+    /// The change it was chosen from.
+    pub change_id: Option<i64>,
+    /// The version it cuts.
+    pub version_id: Option<i64>,
+    /// Stream.
+    pub stream_id: i64,
+    /// Start of the chosen cut, in stream time.
+    pub start: Option<f64>,
+    /// End of the chosen cut, in stream time.
+    pub end: Option<f64>,
+    /// Output name, once exported.
+    pub name: Option<String>,
+    /// Length of the finished cut, in seconds.
+    pub duration: Option<f64>,
+    /// Finished folder, once it exists.
+    pub output_path: Option<String>,
+    /// Where it stands with Plex.
+    pub plex_status: PlexStatus,
+}
+
+const STATUS_COLUMNS: &str = "id, state, kind, change_id, version_id, stream_id, start_time, \
+                              end_time, name, duration, output_path, plex_status";
+
+fn status_from_row(row: &Row<'_>) -> rusqlite::Result<ClipStatus> {
+    let state: String = row.get(1)?;
+    let kind: String = row.get(2)?;
+    let plex: String = row.get(11)?;
+    Ok(ClipStatus {
+        id: row.get(0)?,
+        state: ClipState::parse(&state).ok_or_else(|| invalid(1, &state))?,
+        kind: ClipKind::parse(&kind).ok_or_else(|| invalid(2, &kind))?,
+        change_id: row.get(3)?,
+        version_id: row.get(4)?,
+        stream_id: row.get(5)?,
+        start: row.get(6)?,
+        end: row.get(7)?,
+        name: row.get(8)?,
+        duration: row.get(9)?,
+        output_path: row.get(10)?,
+        plex_status: PlexStatus::parse(&plex).ok_or_else(|| invalid(11, &plex))?,
+    })
 }
 
 fn invalid(column: usize, text: &str) -> rusqlite::Error {
@@ -184,7 +283,7 @@ impl Database {
         let row = self
             .connection
             .query_row(
-                &format!("SELECT {CLIP_COLUMNS} FROM clips WHERE id = ?1"),
+                &format!("SELECT {CLIP_COLUMNS} FROM clips WHERE id = ?1 AND state = 'exported'"),
                 params![id],
                 clip_from_row,
             )
@@ -197,12 +296,66 @@ impl Database {
         let row = self
             .connection
             .query_row(
-                &format!("SELECT {CLIP_COLUMNS} FROM clips WHERE name = ?1"),
+                &format!("SELECT {CLIP_COLUMNS} FROM clips WHERE name = ?1 AND state = 'exported'"),
                 params![name],
                 clip_from_row,
             )
             .optional()?;
         Ok(row)
+    }
+
+    /// Records a clip that is still being shaped, and returns its row ID.
+    pub fn insert_draft(&self, draft: &NewDraft) -> Result<i64, StoreError> {
+        self.connection.execute(
+            "INSERT INTO clips (state, kind, change_id, version_id, stream_id, start_time, end_time)
+             VALUES ('draft', ?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                draft.kind.as_str(),
+                draft.change_id,
+                draft.version_id,
+                draft.stream_id,
+                draft.start,
+                draft.end,
+            ],
+        )?;
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    /// Returns any clip, draft or exported.
+    pub fn clip_status(&self, id: i64) -> Result<Option<ClipStatus>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                &format!("SELECT {STATUS_COLUMNS} FROM clips WHERE id = ?1"),
+                params![id],
+                status_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Returns the clips chosen from a change, oldest first.
+    pub fn change_clips(&self, change_id: i64) -> Result<Vec<ClipStatus>, StoreError> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {STATUS_COLUMNS} FROM clips WHERE change_id = ?1 ORDER BY id"
+        ))?;
+        let rows = statement.query_map(params![change_id], status_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Changes a draft's kind and cut. Returns false when the clip is not a draft.
+    pub fn update_draft(
+        &self,
+        id: i64,
+        kind: ClipKind,
+        start: f64,
+        end: f64,
+    ) -> Result<bool, StoreError> {
+        let changed = self.connection.execute(
+            "UPDATE clips SET kind = ?2, start_time = ?3, end_time = ?4
+             WHERE id = ?1 AND state = 'draft'",
+            params![id, kind.as_str(), start, end],
+        )?;
+        Ok(changed > 0)
     }
 
     /// Sets the last `sq` once the cut's fragments are known.
@@ -397,6 +550,120 @@ mod tests {
             PlexStatus::Failed,
         ] {
             assert_eq!(PlexStatus::parse(status.as_str()), Some(status));
+        }
+    }
+
+    fn draft() -> NewDraft {
+        NewDraft {
+            kind: ClipKind::Addition,
+            change_id: 1,
+            version_id: None,
+            stream_id: 1,
+            start: 100.0,
+            end: 400.0,
+        }
+    }
+
+    fn database_with_change() -> Database {
+        let database = database();
+        database
+            .connection()
+            .execute_batch(
+                "INSERT INTO programs (id, short_name, name_template, addition_suffix, output_dir)
+                   VALUES (1, 'Example TV', '{name}', 'x', 'Example TV');
+                 INSERT INTO changes (id, program_id, stream_id, detected_at, state)
+                   VALUES (1, 1, 1, 0, 'provisional');",
+            )
+            .unwrap();
+        database
+    }
+
+    #[test]
+    fn a_draft_reads_back_with_its_cut() {
+        let database = database_with_change();
+
+        let id = database.insert_draft(&draft()).unwrap();
+
+        let found = database.clip_status(id).unwrap().unwrap();
+        assert_eq!(
+            (found.state, found.kind, found.start, found.end, found.name),
+            (
+                ClipState::Draft,
+                ClipKind::Addition,
+                Some(100.0),
+                Some(400.0),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn a_draft_is_not_an_exported_clip() {
+        let database = database_with_change();
+        let id = database.insert_draft(&draft()).unwrap();
+
+        assert_eq!(database.clip(id).unwrap(), None);
+    }
+
+    #[test]
+    fn an_exported_clip_has_a_status_without_a_cut() {
+        let database = database();
+        let id = database.insert_clip(&clip("Example")).unwrap();
+
+        let found = database.clip_status(id).unwrap().unwrap();
+
+        assert_eq!(
+            (
+                found.state,
+                found.name.as_deref(),
+                found.start,
+                found.duration
+            ),
+            (ClipState::Exported, Some("Example"), None, Some(50.0))
+        );
+    }
+
+    #[test]
+    fn a_change_lists_its_clips_in_order() {
+        let database = database_with_change();
+        let first = database.insert_draft(&draft()).unwrap();
+        let second = database.insert_draft(&draft()).unwrap();
+
+        let ids: Vec<i64> = database
+            .change_clips(1)
+            .unwrap()
+            .iter()
+            .map(|clip| clip.id)
+            .collect();
+
+        assert_eq!(ids, [first, second]);
+        assert!(database.change_clips(2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_draft_can_be_reshaped_but_an_exported_clip_cannot() {
+        let database = database_with_change();
+        let id = database.insert_draft(&draft()).unwrap();
+        let exported = database.insert_clip(&clip("Example")).unwrap();
+
+        let changed = database
+            .update_draft(id, ClipKind::Cycle, 10.0, 20.0)
+            .unwrap();
+        let refused = database
+            .update_draft(exported, ClipKind::Cycle, 10.0, 20.0)
+            .unwrap();
+
+        let found = database.clip_status(id).unwrap().unwrap();
+        assert_eq!(
+            (changed, refused, found.kind, found.start, found.end),
+            (true, false, ClipKind::Cycle, Some(10.0), Some(20.0))
+        );
+    }
+
+    #[test]
+    fn all_states_read_back() {
+        for state in [ClipState::Draft, ClipState::Exported] {
+            assert_eq!(ClipState::parse(state.as_str()), Some(state));
         }
     }
 }

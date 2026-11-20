@@ -337,8 +337,10 @@ impl Database {
     }
 
     /// Closes a change with its comparison.
+    /// Fails when the change is no longer provisional, as an operator may have dismissed it
+    /// since it was read, so the caller's transaction leaves no version behind.
     pub fn confirm_change(&self, confirmation: &Confirmation) -> Result<(), StoreError> {
-        self.connection.execute(
+        let changed = self.connection.execute(
             "UPDATE changes SET state = 'confirmed', new_version_id = ?2, checks = ?3, \
              boundaries = ?4 WHERE id = ?1 AND state = 'provisional'",
             params![
@@ -348,17 +350,45 @@ impl Database {
                 confirmation.boundaries,
             ],
         )?;
+        if changed == 0 {
+            return Err(StoreError::Invalid("the change is no longer provisional"));
+        }
         self.insert_regions(confirmation.change_id, &confirmation.regions)
     }
 
     /// Closes a change whose comparison found nothing new, keeping that comparison as the reason.
+    /// Fails when the change is no longer provisional, as for a confirmation.
     pub fn dismiss_change(&self, dismissal: &Dismissal) -> Result<(), StoreError> {
-        self.connection.execute(
+        let changed = self.connection.execute(
             "UPDATE changes SET state = 'dismissed', checks = ?2 \
              WHERE id = ?1 AND state = 'provisional'",
             params![dismissal.change_id, dismissal.checks],
         )?;
+        if changed == 0 {
+            return Err(StoreError::Invalid("the change is no longer provisional"));
+        }
         self.insert_regions(dismissal.change_id, &dismissal.regions)
+    }
+
+    /// Closes a change on the operator's word, and lets its holds lapse at `hold_until`.
+    /// Returns whether the change was open to close; a closed change stays as it is.
+    pub fn dismiss_change_by_operator(&self, id: i64, hold_until: i64) -> Result<bool, StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE changes SET state = 'dismissed' \
+             WHERE id = ?1 AND state IN ('provisional', 'confirmed')",
+            params![id],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        transaction.execute(
+            "UPDATE retention_holds SET expires_at = ?2 \
+             WHERE change_id = ?1 AND expires_at IS NULL",
+            params![id, hold_until],
+        )?;
+        transaction.commit()?;
+        Ok(true)
     }
 
     fn insert_regions(&self, change_id: i64, regions: &[NewRegion]) -> Result<(), StoreError> {
@@ -400,6 +430,7 @@ impl Database {
 mod tests {
     use super::*;
     use crate::programs::NewProgram;
+    use crate::retention::{HoldOwner, NewHold};
     use crate::streams::tests::new_stream;
 
     fn database() -> (Database, i64, i64) {
@@ -558,6 +589,33 @@ mod tests {
     }
 
     #[test]
+    fn a_change_the_operator_dismissed_cannot_be_closed_by_analysis() {
+        let (database, stream, program) = database();
+        let old = database.insert_version(&version(stream, program)).unwrap();
+        let new = database.insert_version(&version(stream, program)).unwrap();
+        let id = database
+            .insert_change(&change(stream, program, old))
+            .unwrap();
+        database.dismiss_change_by_operator(id, 0).unwrap();
+
+        let confirmed = database.confirm_change(&Confirmation {
+            change_id: id,
+            new_version_id: new,
+            checks: "[]".to_string(),
+            boundaries: "[]".to_string(),
+            regions: Vec::new(),
+        });
+        let dismissed = database.dismiss_change(&Dismissal {
+            change_id: id,
+            checks: "[]".to_string(),
+            regions: Vec::new(),
+        });
+
+        assert!(matches!(confirmed, Err(StoreError::Invalid(_))));
+        assert!(matches!(dismissed, Err(StoreError::Invalid(_))));
+    }
+
+    #[test]
     fn tracking_overlap_replaces_runs_and_moves_the_watermark() {
         let (database, stream, _) = database();
         let run = |start: f64| StoredRun {
@@ -632,5 +690,55 @@ mod tests {
         database.set_stream_period(stream, 12.5).unwrap();
 
         assert_eq!(database.stream_period(stream).unwrap(), Some(12.5));
+    }
+
+    #[test]
+    fn an_operator_closes_an_open_change_once_and_its_holds_lapse() {
+        let (database, stream, program) = database();
+        let old = database.insert_version(&version(stream, program)).unwrap();
+        let id = database
+            .insert_change(&change(stream, program, old))
+            .unwrap();
+        let hold = database
+            .insert_hold(&NewHold {
+                stream_id: stream,
+                itag: 248,
+                sq_first: 1,
+                sq_last: 2,
+                owner: HoldOwner::Change(id),
+            })
+            .unwrap();
+
+        let first = database.dismiss_change_by_operator(id, 5_000).unwrap();
+        let second = database.dismiss_change_by_operator(id, 9_000).unwrap();
+
+        let (state, expires): (String, Option<i64>) = database
+            .connection()
+            .query_row(
+                "SELECT (SELECT state FROM changes WHERE id = ?1),
+                        (SELECT expires_at FROM retention_holds WHERE id = ?2)",
+                [id, hold],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (first, second, state.as_str(), expires),
+            (true, false, "dismissed", Some(5_000))
+        );
+    }
+
+    #[test]
+    fn a_resolved_change_is_not_closed_by_the_operator() {
+        let (database, stream, program) = database();
+        let old = database.insert_version(&version(stream, program)).unwrap();
+        let id = database
+            .insert_change(&change(stream, program, old))
+            .unwrap();
+        database
+            .connection()
+            .execute("UPDATE changes SET state = 'resolved'", [])
+            .unwrap();
+
+        assert!(!database.dismiss_change_by_operator(id, 5_000).unwrap());
     }
 }
