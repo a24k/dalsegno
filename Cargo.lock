@@ -481,7 +481,6 @@ dependencies = [
 name = "dalsegno-store"
 version = "0.6.0-rc.1"
 dependencies = [
- "dalsegno-core",
  "rusqlite",
  "tempfile",
  "thiserror",
