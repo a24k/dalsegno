@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { ago, holes, inJapan, percent, period, timeLeft } from './format'
+import { ago, clock, dvrClock, holes, inJapan, percent, period, timeLeft } from './format'
 
 // 2026-11-04 13:00 UTC, which is 22:00 in Japan.
 const DEADLINE = Date.UTC(2026, 10, 4, 13, 0)
@@ -56,5 +56,33 @@ describe('numbers', () => {
     expect(period(7200)).toBe('2 h (7200.0 s)')
     expect(period(1800.04)).toBe('30 min (1800.0 s)')
     expect(period(12.5)).toBe('12.5 s')
+  })
+})
+
+describe('dvrClock', () => {
+  test('gives the deadline and the hours left', () => {
+    expect(dvrClock(DEADLINE, DEADLINE - 5.5 * HOUR)).toBe(
+      'Export the old version by 11/04 22:00 JST (5 hours left)',
+    )
+  })
+
+  test('gives the minutes left in the last hour', () => {
+    expect(dvrClock(DEADLINE, DEADLINE - 20 * 60_000)).toBe(
+      'Export the old version by 11/04 22:00 JST (20 min left)',
+    )
+  })
+
+  test('says so once the deadline has passed', () => {
+    expect(dvrClock(DEADLINE, DEADLINE)).toBe('The DVR deadline has passed')
+  })
+})
+
+describe('clock', () => {
+  test('gives hours, minutes and seconds', () => {
+    expect([0, 310, 750, 3725].map(clock)).toEqual(['0:00:00', '0:05:10', '0:12:30', '1:02:05'])
+  })
+
+  test('rounds to the second and never goes below zero', () => {
+    expect([59.6, -3].map(clock)).toEqual(['0:01:00', '0:00:00'])
   })
 })

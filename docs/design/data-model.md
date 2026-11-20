@@ -172,20 +172,28 @@ CREATE TABLE change_regions (
 
 CREATE TABLE clips (
   id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE,
+  state TEXT NOT NULL DEFAULT 'exported' CHECK (state IN ('draft','exported')),
+  name TEXT UNIQUE,                   -- set at export
   kind TEXT NOT NULL CHECK (kind IN ('cycle','addition')),
   version_id INTEGER REFERENCES versions(id),
   change_id INTEGER REFERENCES changes(id),
   stream_id INTEGER NOT NULL REFERENCES streams(id),
-  video_itag INTEGER NOT NULL, audio_itag INTEGER NOT NULL,
-  sq_first INTEGER NOT NULL, sq_last INTEGER NOT NULL,
-  duration REAL NOT NULL,
-  metadata TEXT NOT NULL,             -- JSON, as written to the mp4
+  start_time REAL,                    -- chosen cut, in stream time
+  end_time REAL,
+  video_itag INTEGER, audio_itag INTEGER,
+  sq_first INTEGER, sq_last INTEGER,
+  duration REAL,
+  metadata TEXT,                      -- JSON, as written to the mp4
   poster_time REAL,
   output_path TEXT,
   plex_status TEXT NOT NULL DEFAULT 'none'
-    CHECK (plex_status IN ('none','requested','confirmed','failed'))
+    CHECK (plex_status IN ('none','requested','confirmed','failed')),
+  CHECK (state = 'draft' OR (name IS NOT NULL AND video_itag IS NOT NULL
+    AND audio_itag IS NOT NULL AND sq_first IS NOT NULL AND sq_last IS NOT NULL
+    AND duration IS NOT NULL AND metadata IS NOT NULL)),
+  CHECK (state = 'exported' OR (start_time IS NOT NULL AND end_time IS NOT NULL))
 );
+CREATE INDEX clips_change ON clips (change_id);
 
 CREATE TABLE known_clips (
   id INTEGER PRIMARY KEY,

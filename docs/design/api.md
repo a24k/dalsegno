@@ -30,8 +30,8 @@
 | Change detail | `GET /changes/{id}` | `dalsegno diff` |
 | Comparison | `GET /changes/{id}/diff` | `dalsegno diff` |
 | Dismiss change | `POST /changes/{id}/dismiss` | `dalsegno dismiss` |
-| Create clip | `POST /clips` | `dalsegno cut` |
-| Clip detail, edit | `GET`, `PATCH /clips/{id}` | `dalsegno cut` |
+| Create clip | `POST /clips` | `dalsegno clip`, `cut` |
+| Clip detail, edit | `GET`, `PATCH /clips/{id}` | `dalsegno clip`, `cut` |
 | Boundary candidates | `GET /clips/{id}/candidates` | `dalsegno refine` |
 | Preview | `GET /clips/{id}/preview` (Range) | n/a |
 | Contact sheet | `GET /clips/{id}/sheet` | n/a |
@@ -71,6 +71,21 @@ and `end` in stream time, at most 1800 s long, and is refused with `409` where t
 envelope does not cover the stretch. Known clips are stored now, and analysis masks them from
 M7.
 
+`GET /changes/{id}` adds the regions with their IDs, the old and new version IDs and the clips
+chosen from the change. `GET /changes/{id}/diff` gives two bars, `old` and `new`, each from the
+start of its cycle with its `period`, the regions in each with their IDs and the
+`video_boundaries` that fall inside them, and the self-`checks`; a provisional change has no
+`new` bar. `POST /changes/{id}/dismiss` closes a provisional or confirmed change, answers with
+the change as `GET` does and lets its holds lapse 7 days later; a change already closed is a
+`409`. A clip is a draft from its first selection until it is exported, under one ID. `POST
+/clips` takes `change`, `kind` (`cycle` or `addition`), `start` and `end` in stream time and
+optionally `version`, which must be the change's old or new version, and answers `201` with the
+clip; a cut must start at 0 or later, end after it starts and last at most 7 days, and an
+unknown change is a `404`. `PATCH /clips/{id}` takes any of `kind`, `start` and `end`, and is
+refused with `409` once the clip is exported. A clip shows `id`, `state` (`draft` or
+`exported`), `kind`, `change_id`, `version_id`, `stream_id`, `start`, `end`, `name`,
+`duration`, `output_path` and `plex_status`.
+
 `GET /settings` gives each operational setting with its `value`, the `default` from the file,
 environment or flags, and whether it is `overridden`, and the bootstrap values with secrets and
 the cookie file only as set or not. `PUT /settings` takes the keys to change, or null to drop an
@@ -100,6 +115,10 @@ dalsegno programs
 dalsegno link     <id> <program>
 dalsegno versions <program>
 dalsegno known    <program> [--add <name> --stream <id> --from <s> --to <s>] [--remove <clip>]
+dalsegno diff     <change>
+dalsegno dismiss  <change>
+dalsegno clip     --change <change> --kind <cycle|addition> --from <s> --to <s> [--version <v>]
+dalsegno clip     <clip> [--kind <k>] [--from <s>] [--to <s>]
 dalsegno doctor   [--stream <id>]
 dalsegno set      [<key>=<value>]... [--reset <key>]...
 dalsegno set      --stream <id> title=<title>
@@ -115,7 +134,10 @@ it. `doctor --stream` and `add` probe the stream, which can take a few minutes. 
 shared operational settings, and changes them when given `key=value` or `--reset key`. With
 `--stream` it changes a stream's title, and with `--program` the given fields of a program,
 which cannot go with `--reset`. `program` changes the program a stream has, or makes one and
-links it, and `known` lists a program's known clips.
+links it, and `known` lists a program's known clips. `diff` shows a change's two bars, each from
+the start of its cycle, with the video boundaries and the checks, and `dismiss` closes the
+change. `clip` starts a draft from a change, or shows a clip, or reshapes a draft when given
+`--kind`, `--from` or `--to`.
 
 A running job that reports progress shows its share done and, from its pace so far, about how
 long is left. So far only backfill reports, after each 500 fragments, and the API returns it as
@@ -127,7 +149,7 @@ as `12 to fill, 0 lost`. A new or restarted stream has fragments to fill until b
 up, and a lost fragment is one the recording will never have.
 
 Offline commands read files and never need the service (FR-N11). Passing `--env` selects
-offline mode; otherwise `scan` and `diff` call the API:
+offline mode; otherwise `scan` and `diff` call the API (`diff` then takes a change instead):
 
 ```text
 dalsegno envelope --fragments <dir> --first <sq> --last <sq> --output <file>

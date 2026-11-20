@@ -52,6 +52,10 @@ pub struct ChangeStatus {
     pub checks: Option<String>,
     /// JSON array of video boundaries.
     pub boundaries: Option<String>,
+    /// The version it changes.
+    pub old_version_id: Option<i64>,
+    /// The version it turned into, once confirmed.
+    pub new_version_id: Option<i64>,
 }
 
 /// A version as the operator sees it.
@@ -80,12 +84,16 @@ pub struct VersionStatus {
 /// A stored stretch of a comparison.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegionStatus {
+    /// Row ID.
+    pub id: i64,
     /// `existing`, `new`, `revival`, `known`, `deleted` or `no_data`.
     pub class: String,
     /// Start.
     pub start: f64,
     /// End.
     pub end: f64,
+    /// The version it matched.
+    pub match_version: Option<i64>,
     /// Where it starts in the version it matched.
     pub match_start: Option<f64>,
 }
@@ -101,7 +109,7 @@ const VERSION_COLUMNS: &str = "id, stream_id, period_audio, period_video, anchor
                                first_seen_at, on_air_from_time, on_air_until_time, \
                                last_cycle_start_time";
 const CHANGE_COLUMNS: &str = "id, program_id, stream_id, state, detected_at, dvr_deadline_at, \
-                              start_time, checks, boundaries";
+                              start_time, checks, boundaries, old_version_id, new_version_id";
 
 type RawStream = (StreamStatus, String);
 
@@ -140,6 +148,8 @@ fn read_change(row: &Row<'_>) -> rusqlite::Result<ChangeStatus> {
         start_time: row.get(6)?,
         checks: row.get(7)?,
         boundaries: row.get(8)?,
+        old_version_id: row.get(9)?,
+        new_version_id: row.get(10)?,
     })
 }
 
@@ -249,15 +259,17 @@ impl Database {
     /// Returns the comparison of a change, in time order.
     pub fn change_regions(&self, id: i64) -> Result<Vec<RegionStatus>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT class, start_time, end_time, match_start_time FROM change_regions \
-             WHERE change_id = ?1 ORDER BY id",
+            "SELECT id, class, start_time, end_time, match_version_id, match_start_time \
+             FROM change_regions WHERE change_id = ?1 ORDER BY id",
         )?;
         let rows = statement.query_map([id], |row| {
             Ok(RegionStatus {
-                class: row.get(0)?,
-                start: row.get(1)?,
-                end: row.get(2)?,
-                match_start: row.get(3)?,
+                id: row.get(0)?,
+                class: row.get(1)?,
+                start: row.get(2)?,
+                end: row.get(3)?,
+                match_version: row.get(4)?,
+                match_start: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -495,6 +507,8 @@ mod tests {
                 start_time: 30.0,
                 checks: None,
                 boundaries: None,
+                old_version_id: Some(old),
+                new_version_id: None,
             }
         );
     }
@@ -642,19 +656,25 @@ mod tests {
 
         let regions = database.change_regions(id).unwrap();
 
+        assert_eq!(regions.len(), 2);
+        assert!(regions[0].id < regions[1].id);
         assert_eq!(
             regions,
             [
                 RegionStatus {
+                    id: regions[0].id,
                     class: "existing".to_string(),
                     start: 0.0,
                     end: 10.0,
+                    match_version: Some(old),
                     match_start: Some(5.0),
                 },
                 RegionStatus {
+                    id: regions[1].id,
                     class: "new".to_string(),
                     start: 10.0,
                     end: 20.0,
+                    match_version: None,
                     match_start: None,
                 },
             ]

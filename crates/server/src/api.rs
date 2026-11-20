@@ -7,6 +7,9 @@ use crate::catalog::{
     add_stream, create_program, link_stream, list_program_changes, list_programs, list_versions,
     patch_stream, program_detail, put_program,
 };
+use crate::changes::{
+    change_detail, change_diff, clip_detail, create_clip, dismiss_change, patch_clip,
+};
 use crate::events::{CAPACITY, EventBus};
 use crate::known::{add_known_clip, list_known_clips, remove_known_clip};
 use crate::operations::{create_job, doctor, get_settings, put_settings};
@@ -25,7 +28,7 @@ use dalsegno_app::fetch::{SharedDatabase, lock};
 use dalsegno_app::settings::LiveSettings;
 use dalsegno_store::database::Database;
 use dalsegno_store::jobs::{JobRow, JobState};
-use dalsegno_store::status::{ChangeStatus, Listing, RegionStatus, StreamStatus};
+use dalsegno_store::status::{ChangeStatus, Listing, StreamStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::net::IpAddr;
@@ -145,6 +148,7 @@ impl From<AcquireError> for ApiError {
             AcquireError::InvalidRequest(message) => {
                 Self::new(StatusCode::CONFLICT, "invalid_request", message)
             }
+            AcquireError::NotFound(_) => Self::not_found(),
             other => Self::internal(&other.to_string()),
         }
     }
@@ -255,15 +259,8 @@ pub(crate) fn change_json(change: &ChangeStatus) -> Value {
         "start_time": change.start_time,
         "checks": stored(change.checks.as_deref()),
         "video_boundaries": stored(change.boundaries.as_deref()),
-    })
-}
-
-fn region_json(region: &RegionStatus) -> Value {
-    json!({
-        "class": region.class,
-        "start": region.start,
-        "end": region.end,
-        "match_start": region.match_start,
+        "old_version_id": change.old_version_id,
+        "new_version_id": change.new_version_id,
     })
 }
 
@@ -369,21 +366,6 @@ async fn list_changes(
             .list_changes(paging.limit(), paging.offset())
             .map_err(store_error)?;
         Ok(paging.envelope(total, rows.iter().map(change_json).collect()))
-    })
-    .await
-}
-
-async fn change_detail(
-    State(state): State<ApiState>,
-    Path(id): Path<i64>,
-) -> Result<Json<Envelope>, ApiError> {
-    with_database(&state.database, move |database| {
-        let change = database.change_status(id).map_err(store_error)?;
-        let change = change.ok_or_else(ApiError::not_found)?;
-        let regions = database.change_regions(id).map_err(store_error)?;
-        let mut body = change_json(&change);
-        body["regions"] = regions.iter().map(region_json).collect();
-        Ok(ok(body))
     })
     .await
 }
@@ -532,6 +514,10 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/changes", get(list_changes))
         .route("/changes/{id}", get(change_detail))
+        .route("/changes/{id}/diff", get(change_diff))
+        .route("/changes/{id}/dismiss", post(dismiss_change))
+        .route("/clips", post(create_clip))
+        .route("/clips/{id}", get(clip_detail).patch(patch_clip))
         .route("/jobs", get(list_jobs).post(create_job))
         .route("/jobs/{id}/cancel", post(cancel_job))
         .route("/settings", get(get_settings).put(put_settings))

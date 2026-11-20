@@ -141,3 +141,57 @@ fn unknown_ip_policy_is_rejected() {
 
     assert_eq!(error.kind(), ErrorKind::ValueValidation);
 }
+
+#[test]
+fn diff_is_offline_with_an_env_and_online_with_a_change() {
+    let parse = |args: &[&str]| Cli::try_parse_from(args);
+
+    let offline = parse(&[
+        "dalsegno",
+        "diff",
+        "--env",
+        "a.npy",
+        "--period",
+        "60",
+        "--against",
+        "b.npy",
+        "--against-period",
+        "50",
+    ])
+    .unwrap();
+    let Some(Command::Diff { env, change, .. }) = offline.command else {
+        panic!("expected diff");
+    };
+    assert_eq!((env.is_some(), change), (true, None));
+    let Some(Command::Diff { env, change, .. }) =
+        parse(&["dalsegno", "diff", "7"]).unwrap().command
+    else {
+        panic!("expected diff");
+    };
+    assert_eq!((env.is_some(), change), (false, Some(7)));
+    assert!(parse(&["dalsegno", "diff"]).is_err());
+    assert!(parse(&["dalsegno", "diff", "--env", "a.npy"]).is_err());
+    assert!(parse(&["dalsegno", "diff", "7", "--env", "a.npy"]).is_err());
+}
+
+#[test]
+fn clip_creates_from_a_change_and_edits_by_its_id() {
+    let parse = |args: &[&str]| Cli::try_parse_from(args);
+
+    let created = parse(&[
+        "dalsegno", "clip", "--change", "3", "--kind", "addition", "--from", "1.5", "--to", "9",
+    ])
+    .unwrap();
+    let Some(Command::Clip { clip, change, .. }) = created.command else {
+        panic!("expected clip");
+    };
+    assert_eq!((clip, change), (None, Some(3)));
+    let edited = parse(&["dalsegno", "clip", "5", "--to", "12"]).unwrap();
+    let Some(Command::Clip { clip, to, .. }) = edited.command else {
+        panic!("expected clip");
+    };
+    assert_eq!((clip, to), (Some(5), Some(12.0)));
+    assert!(parse(&["dalsegno", "clip"]).is_err());
+    assert!(parse(&["dalsegno", "clip", "--change", "3"]).is_err());
+    assert!(parse(&["dalsegno", "clip", "5", "--change", "3"]).is_err());
+}

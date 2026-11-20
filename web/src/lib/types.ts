@@ -64,6 +64,81 @@ export interface Change {
   detected_at: number
   dvr_deadline_at: number | null
   start_time: number | null
+  old_version_id: number | null
+  new_version_id: number | null
+}
+
+/** What a change's regions are classed as. */
+export type RegionClass = 'existing' | 'new' | 'revival' | 'known' | 'deleted' | 'no_data'
+
+/** A region of a change, as `GET /changes/{id}` lists it. */
+export interface Region {
+  id: number
+  class: RegionClass
+  start: number
+  end: number
+  match_start: number | null
+  match_version: number | null
+}
+
+export type ClipKind = 'cycle' | 'addition'
+
+/** A clip, from the moment its regions are chosen until it is exported. */
+export interface Clip {
+  id: number
+  state: 'draft' | 'exported'
+  kind: ClipKind
+  change_id: number | null
+  version_id: number | null
+  stream_id: number
+  start: number | null
+  end: number | null
+  name: string | null
+  duration: number | null
+  output_path: string | null
+  plex_status: 'none' | 'requested' | 'confirmed' | 'failed'
+}
+
+/** A change with its regions and the clips made from it. */
+export interface ChangeDetail extends Change {
+  regions: Region[]
+  clips: Clip[]
+}
+
+/** A region on one bar of the version strip. Times are stream seconds. */
+export interface BarRegion {
+  id: number
+  class: RegionClass
+  start: number
+  end: number
+  match_start: number | null
+  video_boundaries: number[]
+}
+
+/** One version of a change, from the start of its cycle. */
+export interface Bar {
+  version_id: number
+  start: number
+  period: number
+  regions: BarRegion[]
+}
+
+/** One automatic check of a change. */
+export interface SelfCheck {
+  name: string
+  expected: number
+  actual: number
+  tolerance: number
+  passed: boolean
+}
+
+/** Both versions of a change, as `GET /changes/{id}/diff` gives them. */
+export interface Comparison {
+  change_id: number
+  state: Change['state']
+  old: Bar | null
+  new: Bar | null
+  checks: SelfCheck[]
 }
 
 export interface Job {

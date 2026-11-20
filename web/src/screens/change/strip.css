@@ -1,0 +1,115 @@
+/* The version strip. Each class has its own colour, and a block also says its class in words. */
+.strip {
+  --class-existing: #d6e4f7;
+  --class-new: #cdeccf;
+  --class-revival: #f3e3b3;
+  --class-known: #e3d3f0;
+  --class-deleted: #f6cfcb;
+  --class-no_data: #e4e5e8;
+  --block-ink: #1b1d21;
+  overflow-x: auto;
+}
+
+@media (prefers-color-scheme: dark) {
+  .strip {
+    --class-existing: #2a4466;
+    --class-new: #2a5a31;
+    --class-revival: #6a5520;
+    --class-known: #52386b;
+    --class-deleted: #6e2f2a;
+    --class-no_data: #3a3d44;
+    --block-ink: #f0f1f3;
+  }
+}
+
+.strip h3 {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 1rem;
+}
+
+.axis,
+.track {
+  position: relative;
+  min-width: 40rem;
+}
+
+.axis {
+  height: 1.5rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.tick {
+  position: absolute;
+  bottom: 0;
+  height: 0.25rem;
+  border-left: 1px solid var(--muted);
+}
+
+.tick[data-label] {
+  height: 0.5rem;
+}
+
+.tick span {
+  position: absolute;
+  bottom: 0.5rem;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.track {
+  height: 3rem;
+  margin-block: 0.25rem;
+}
+
+.block {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  overflow: hidden;
+  padding: 0 0.25rem;
+  border: 1px solid var(--fg);
+  background: var(--class-existing);
+  color: var(--block-ink);
+  font: inherit;
+  font-size: 0.75rem;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.block[data-class='new'] {
+  background: var(--class-new);
+}
+
+.block[data-class='revival'] {
+  background: var(--class-revival);
+}
+
+.block[data-class='known'] {
+  background: var(--class-known);
+}
+
+.block[data-class='deleted'] {
+  background: var(--class-deleted);
+}
+
+.block[data-class='no_data'] {
+  background: var(--class-no_data);
+}
+
+/* A selected block is thick-edged, not only changed in colour. */
+.block[aria-pressed='true'] {
+  border-width: 3px;
+  font-weight: 700;
+}
+
+.boundary {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 2px dashed var(--fg);
+  pointer-events: none;
+}

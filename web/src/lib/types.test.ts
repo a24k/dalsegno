@@ -12,6 +12,8 @@ function change(id: number, state: Change['state'], deadline: number | null): Ch
     detected_at: 0,
     dvr_deadline_at: deadline,
     start_time: null,
+    old_version_id: null,
+    new_version_id: null,
   }
 }
 

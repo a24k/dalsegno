@@ -84,6 +84,13 @@ test('a stream that does not exist is not found', async ({ page }) => {
   await expect(page.getByRole('heading', { level: 1, name: 'Not found' })).toBeVisible()
 })
 
+test('a change that does not exist is not found', async ({ page }) => {
+  await page.goto('/changes/1')
+
+  await expect(page.getByRole('heading', { level: 1, name: 'Not found' })).toBeVisible()
+  await expect(page.getByText('There is no such change.')).toBeVisible()
+})
+
 test('the header shows the version of the running service', async ({ page }) => {
   const manifest = readFileSync(resolve(import.meta.dirname, '../../Cargo.toml'), 'utf8')
   const workspace = manifest.split('[workspace.package]')[1] ?? ''

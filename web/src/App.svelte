@@ -1,5 +1,6 @@
 <script lang="ts">
   import Placeholder from './lib/Placeholder.svelte'
+  import Change from './screens/Change.svelte'
   import Dashboard from './screens/Dashboard.svelte'
   import Jobs from './screens/Jobs.svelte'
   import Settings from './screens/Settings.svelte'
@@ -71,6 +72,8 @@
       <Streams />
     {:else if router.route.screen === 'stream'}
       <Stream />
+    {:else if router.route.screen === 'change'}
+      <Change />
     {:else if router.route.screen === 'jobs'}
       <Jobs />
     {:else if router.route.screen === 'settings'}

@@ -82,6 +82,9 @@ pub enum AcquireError {
     /// A clip of this name exists with other boundaries, and is not replaced.
     #[error("a clip named {0} already exists with other boundaries")]
     NameTaken(String),
+    /// The thing asked for does not exist.
+    #[error("there is no such {0}")]
+    NotFound(&'static str),
     /// No clip has this ID.
     #[error("there is no clip {0}")]
     NoClip(i64),

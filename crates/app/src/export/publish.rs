@@ -1,5 +1,6 @@
 //! Moving a finished folder into the library and asking Plex for it (FR-E10, FR-E11).
 
+use super::HOLD_AFTER_CLOSE_MS;
 use crate::acquisition::Library;
 use crate::error::AcquireError;
 use crate::fetch::lock;
@@ -18,8 +19,6 @@ use tokio::task::spawn_blocking;
 /// Polls while Plex scans, for about two minutes.
 const PLEX_POLLS: u32 = 24;
 const PLEX_POLL_INTERVAL: Duration = Duration::from_secs(5);
-/// Holds last this long past the owner's close (`docs/design/data-model.md`).
-const HOLD_AFTER_CLOSE_MS: i64 = 7 * 24 * 3600 * 1000;
 
 /// A Plex section to tell about a new folder.
 #[derive(Debug, Clone)]
