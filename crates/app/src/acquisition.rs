@@ -84,6 +84,12 @@ impl Library {
                 source,
             })?;
         let database = Database::open(&data_dir.join(DATABASE_FILE))?;
+        let schema = database.schema();
+        if schema.found == schema.now {
+            tracing::info!(schema = schema.now, "database ready");
+        } else {
+            tracing::info!(from = schema.found, to = schema.now, "database migrated");
+        }
         Ok(Self {
             database: Arc::new(Mutex::new(database)),
             store: FragmentStore::new(data_dir),

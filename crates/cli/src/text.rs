@@ -2,7 +2,7 @@
 
 use dalsegno_app::analysis::Diff;
 use dalsegno_app::doctor::DoctorReport;
-use dalsegno_app::export::{CandidateReport, CutReport, PublishReport, RefineReport};
+use dalsegno_app::export::{CandidateReport, CutReport, PublishReport};
 use dalsegno_app::offline::{PeriodReport, ScanReport};
 use dalsegno_app::probe::ProbeReport;
 
@@ -31,16 +31,6 @@ pub(crate) fn candidates_text(report: &CandidateReport) -> String {
         "{starts}{ends}contact sheet: {}\n",
         report.contact_sheet.display()
     )
-}
-
-pub(crate) fn refine_text(report: &RefineReport) -> String {
-    match report.video {
-        Some(video) => format!(
-            "audio: {:.3}\nvideo: {:.3} from {} edges\n",
-            report.audio, video.period, video.agreeing
-        ),
-        None => format!("audio: {:.3}\nvideo: no black agrees\n", report.audio),
-    }
 }
 
 pub(crate) fn cut_text(report: &CutReport) -> String {

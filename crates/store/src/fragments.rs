@@ -104,6 +104,26 @@ impl Database {
         Ok(sq.map(|sq| sq as u64))
     }
 
+    /// Returns the stored fragment playing at a stream time, or the last one before. Its
+    /// `stream_time` is where the fragment, and so a keyframe, starts.
+    pub fn fragment_row_at_time(
+        &self,
+        stream_id: i64,
+        itag: u32,
+        time: f64,
+    ) -> Result<Option<FragmentRow>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT stream_id, itag, sq, stream_time, duration, size, fetched_at FROM fragments \
+                 WHERE stream_id = ?1 AND itag = ?2 AND stream_time <= ?3 \
+                 ORDER BY stream_time DESC LIMIT 1",
+                params![stream_id, itag, time],
+                fragment_from_row,
+            )
+            .optional()?)
+    }
+
     /// Returns the lowest and highest stored `sq`.
     pub fn fragment_bounds(
         &self,
@@ -206,6 +226,19 @@ pub(crate) mod tests {
         let rows = database.fragments_in_range(id, 140, 6, 8).unwrap();
 
         assert_eq!(rows, [fragment(id, 140, 6), fragment(id, 140, 7)]);
+    }
+
+    #[test]
+    fn the_row_at_a_time_is_the_fragment_that_contains_it() {
+        let database = Database::open_in_memory().unwrap();
+        let id = stream(&database);
+        database.put_fragment(&fragment(id, 140, 5)).unwrap();
+
+        let inside = database.fragment_row_at_time(id, 140, 27.5).unwrap();
+        let before_all = database.fragment_row_at_time(id, 140, 24.0).unwrap();
+
+        assert_eq!(inside, Some(fragment(id, 140, 5)));
+        assert_eq!(before_all, None);
     }
 
     #[test]

@@ -395,7 +395,7 @@ dependencies = [
 
 [[package]]
 name = "dalsegno"
-version = "0.6.0-rc.6"
+version = "0.6.0-rc.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "dalsegno-app"
-version = "0.6.0-rc.6"
+version = "0.6.0-rc.7"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "dalsegno-core"
-version = "0.6.0-rc.6"
+version = "0.6.0-rc.7"
 dependencies = [
  "dalsegno-test-support",
  "rayon",
@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "dalsegno-io"
-version = "0.6.0-rc.6"
+version = "0.6.0-rc.7"
 dependencies = [
  "dalsegno-core",
  "reqwest",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "dalsegno-server"
-version = "0.6.0-rc.6"
+version = "0.6.0-rc.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -475,12 +475,13 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower",
+ "tower-http 0.7.1",
  "tracing",
 ]
 
 [[package]]
 name = "dalsegno-store"
-version = "0.6.0-rc.6"
+version = "0.6.0-rc.7"
 dependencies = [
  "rusqlite",
  "tempfile",
@@ -489,7 +490,7 @@ dependencies = [
 
 [[package]]
 name = "dalsegno-test-support"
-version = "0.6.0-rc.6"
+version = "0.6.0-rc.7"
 
 [[package]]
 name = "deadpool"
@@ -806,6 +807,12 @@ dependencies = [
  "http-body",
  "pin-project-lite",
 ]
+
+[[package]]
+name = "http-range-header"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
 
 [[package]]
 name = "httparse"
@@ -1493,7 +1500,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower",
- "tower-http",
+ "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -2212,6 +2219,31 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "url",
+]
+
+[[package]]
+name = "tower-http"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08a05a66a4fdd61cbbe0a1d755ffe0ca6aba159dd4820936a0ff8a8278245b9c"
+dependencies = [
+ "bitflags",
+ "bytes",
+ "futures-core",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "http-range-header",
+ "httpdate",
+ "mime",
+ "mime_guess",
+ "percent-encoding",
+ "pin-project-lite",
+ "tokio",
+ "tokio-util",
+ "tower-layer",
+ "tower-service",
 ]
 
 [[package]]

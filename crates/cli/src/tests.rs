@@ -195,3 +195,16 @@ fn clip_creates_from_a_change_and_edits_by_its_id() {
     assert!(parse(&["dalsegno", "clip", "--change", "3"]).is_err());
     assert!(parse(&["dalsegno", "clip", "5", "--change", "3"]).is_err());
 }
+
+#[test]
+fn refine_takes_a_clip() {
+    let parse = |args: &[&str]| Cli::try_parse_from(args);
+
+    let Some(Command::Refine { clip }) = parse(&["dalsegno", "refine", "5"]).unwrap().command
+    else {
+        panic!("expected refine");
+    };
+    assert_eq!(clip, 5);
+    assert!(parse(&["dalsegno", "refine"]).is_err());
+    assert!(parse(&["dalsegno", "refine", "abcDEF123_-", "--boundary", "1"]).is_err());
+}

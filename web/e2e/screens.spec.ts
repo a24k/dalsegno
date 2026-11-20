@@ -101,3 +101,10 @@ test('the header shows the version of the running service', async ({ page }) => 
 
   await expect(page.locator('header .version')).toHaveText(version ?? '')
 })
+
+test('the boundary editor says so when the clip does not exist', async ({ page }) => {
+  await page.goto('/clips/1/edit')
+
+  await expect(page.getByRole('heading', { level: 1, name: 'Not found' })).toBeVisible()
+  await expect(page.getByText('There is no such clip.')).toBeVisible()
+})

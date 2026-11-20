@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.6.0-rc.6"
+version = "0.6.0-rc.7"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/a24k/dalsegno"
@@ -31,6 +31,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "1"
 tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.7", default-features = false, features = ["fs"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 unicode-normalization = "0.1"

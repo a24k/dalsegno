@@ -45,7 +45,7 @@ fn region_json(region: &RegionStatus) -> Value {
     })
 }
 
-fn clip_json(clip: &ClipStatus) -> Value {
+pub(crate) fn clip_json(clip: &ClipStatus) -> Value {
     json!({
         "id": clip.id,
         "state": clip.state.as_str(),
@@ -181,6 +181,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use dalsegno_app::fetch::lock;
     use dalsegno_store::changes::{Confirmation, NewChange, NewRegion, NewVersion};
+    use dalsegno_store::fragments::FragmentRow;
     use dalsegno_store::programs::NewProgram;
     use dalsegno_store::retention::{HoldOwner, NewHold};
     use serde_json::{Value, json};
@@ -191,9 +192,23 @@ mod tests {
         new: i64,
     }
 
-    /// A change on the fixture's stream with an old and a new version, still provisional.
+    /// A change on the fixture's stream with an old and a new version, still provisional. The
+    /// stream's audio has a fragment every 5 s from 5.0 to 500.0.
     fn seed(fixture: &Fixture) -> Seeded {
         let database = lock(&fixture.state.database).unwrap();
+        for sq in 1..=100 {
+            database
+                .put_fragment(&FragmentRow {
+                    stream_id: fixture.stream,
+                    itag: 140,
+                    sq,
+                    stream_time: sq as f64 * 5.0,
+                    duration: 5.0,
+                    size: 1,
+                    fetched_at: 0,
+                })
+                .unwrap();
+        }
         let program = database
             .insert_program(&NewProgram {
                 short_name: "Example TV".to_string(),
@@ -386,6 +401,32 @@ mod tests {
         let (status, _) = post_empty(&fixture, "/api/v1/changes/9/dismiss").await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_start_with_no_stored_audio_is_refused() {
+        let fixture = fixture();
+        let seeded = seed(&fixture);
+        let body = json!({ "change": seeded.change, "kind": "cycle", "start": 2.0,
+                           "end": 400.0 });
+
+        let (status, error) = send_body(&fixture, "POST", "/api/v1/clips", body).await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(error["error"]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn a_start_inside_a_fragment_is_stored_at_its_start() {
+        let fixture = fixture();
+        let seeded = seed(&fixture);
+        let body = json!({ "change": seeded.change, "kind": "cycle", "start": 102.5,
+                           "end": 400.0 });
+
+        let (_, created) = send_body(&fixture, "POST", "/api/v1/clips", body).await;
+
+        assert_eq!(created["data"]["start"], 100.0);
+        assert_eq!(created["data"]["end"], 400.0);
     }
 
     #[tokio::test]

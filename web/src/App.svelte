@@ -1,6 +1,7 @@
 <script lang="ts">
   import Placeholder from './lib/Placeholder.svelte'
   import Change from './screens/Change.svelte'
+  import ClipEditor from './screens/ClipEditor.svelte'
   import Dashboard from './screens/Dashboard.svelte'
   import Jobs from './screens/Jobs.svelte'
   import Settings from './screens/Settings.svelte'
@@ -74,6 +75,8 @@
       <Stream />
     {:else if router.route.screen === 'change'}
       <Change />
+    {:else if router.route.screen === 'clip-edit'}
+      <ClipEditor />
     {:else if router.route.screen === 'jobs'}
       <Jobs />
     {:else if router.route.screen === 'settings'}
