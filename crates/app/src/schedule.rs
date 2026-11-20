@@ -47,13 +47,14 @@ impl Priority {
 /// The shared budget.
 #[derive(Debug)]
 pub struct Scheduler {
-    limits: FetchLimits,
     state: Mutex<State>,
     changed: Notify,
 }
 
 #[derive(Debug)]
 struct State {
+    /// Kept with the counts, so a change of limits is seen by the next request to start.
+    limits: FetchLimits,
     in_flight: usize,
     next_start: Instant,
     waiting: [usize; PRIORITIES],
@@ -98,8 +99,8 @@ impl Scheduler {
     /// A budget with these limits, which [`FetchLimits::validate`] has accepted.
     pub fn new(limits: FetchLimits) -> Arc<Self> {
         Arc::new(Self {
-            limits,
             state: Mutex::new(State {
+                limits,
                 in_flight: 0,
                 next_start: Instant::now(),
                 waiting: [0; PRIORITIES],
@@ -109,9 +110,16 @@ impl Scheduler {
         })
     }
 
-    /// The configured limits.
+    /// The limits in force.
     pub fn limits(&self) -> FetchLimits {
-        self.limits
+        self.state().limits
+    }
+
+    /// Changes the limits, which [`FetchLimits::validate`] has accepted, for every request
+    /// that starts from now on. Requests in flight finish as they are.
+    pub fn set_limits(&self, limits: FetchLimits) {
+        self.state().limits = limits;
+        self.changed.notify_waiters();
     }
 
     /// Waits for a slot.
@@ -162,7 +170,7 @@ impl Scheduler {
         let is_outranked = state.waiting[..priority.index()]
             .iter()
             .any(|&count| count > 0);
-        if is_outranked || state.in_flight >= self.limits.concurrency {
+        if is_outranked || state.in_flight >= state.limits.concurrency {
             return Err(Wait::Turn);
         }
         if now < state.next_start {
@@ -170,23 +178,23 @@ impl Scheduler {
         }
         let is_slowed = state.slow_until.is_some_and(|until| now < until);
         state.in_flight += 1;
-        state.next_start = now + self.interval(is_slowed);
+        state.next_start = now + interval(state.limits, is_slowed);
         Ok(())
-    }
-
-    fn interval(&self, is_slowed: bool) -> Duration {
-        let base = Duration::try_from_secs_f64(1.0 / self.limits.requests_per_second)
-            .unwrap_or(FALLBACK_INTERVAL);
-        if is_slowed {
-            base * SLOWDOWN_FACTOR
-        } else {
-            base
-        }
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
         // Every update completes before it can panic, so a poisoned state is still whole.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+fn interval(limits: FetchLimits, is_slowed: bool) -> Duration {
+    let base =
+        Duration::try_from_secs_f64(1.0 / limits.requests_per_second).unwrap_or(FALLBACK_INTERVAL);
+    if is_slowed {
+        base * SLOWDOWN_FACTOR
+    } else {
+        base
     }
 }
 
@@ -219,6 +227,11 @@ impl Requests {
     /// The limits of the shared budget.
     pub fn limits(&self) -> FetchLimits {
         self.scheduler.limits()
+    }
+
+    /// Changes the limits of the shared budget, for every kind of work at once.
+    pub fn set_limits(&self, limits: FetchLimits) {
+        self.scheduler.set_limits(limits);
     }
 
     /// Requests one fragment once its turn comes.
@@ -365,5 +378,44 @@ mod tests {
 
         assert_eq!(slowed, Duration::from_millis(300));
         assert_eq!(recovered, Duration::from_millis(100));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn raising_the_concurrency_starts_a_waiting_request() {
+        let scheduler = scheduler(1, 1_000.0);
+        let _first = scheduler.acquire(Priority::Backfill).await;
+        let second = tokio::spawn({
+            let scheduler = Arc::clone(&scheduler);
+            async move { drop(scheduler.acquire(Priority::Backfill).await) }
+        });
+        settle().await;
+        assert!(!second.is_finished());
+
+        scheduler.set_limits(FetchLimits {
+            concurrency: 2,
+            requests_per_second: 1_000.0,
+        });
+        tokio::time::advance(Duration::from_millis(10)).await;
+        settle().await;
+
+        assert!(second.is_finished());
+        assert_eq!(scheduler.limits().concurrency, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_new_rate_spaces_the_next_starts() {
+        let scheduler = scheduler(4, 10.0);
+        drop(scheduler.acquire(Priority::Backfill).await);
+        scheduler.set_limits(FetchLimits {
+            concurrency: 4,
+            requests_per_second: 1.0,
+        });
+        // The start already planned keeps its time; the ones after it follow the new rate.
+        let started = Instant::now();
+
+        drop(scheduler.acquire(Priority::Backfill).await);
+        drop(scheduler.acquire(Priority::Backfill).await);
+
+        assert_eq!(started.elapsed(), Duration::from_millis(1_100));
     }
 }

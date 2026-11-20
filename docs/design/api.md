@@ -46,6 +46,20 @@ the object the jobs, streams or changes list returns for that ID, sent when it i
 differs, within about a second. A `resync` event tells a page that fell behind to refetch, as
 it does whenever its connection opens; the Web UI reconnects with a backoff from 1 s to 30 s.
 
+`POST /jobs` takes `{"kind": ...}` with `backfill` (`stream`, optional `hours` up to 120),
+`features`, `analysis` (`stream`), `sweep`, or `fetch` (`stream`, `itag`, `first`, `last`, at
+most 100000 fragments into the library), and answers `202` with the queued job. Stream IDs are
+the numeric IDs of `/streams`.
+
+`GET /settings` gives each operational setting with its `value`, the `default` from the file,
+environment or flags, and whether it is `overridden`, and the bootstrap values with secrets and
+the cookie file only as set or not. `PUT /settings` takes the keys to change, or null to drop an
+override, and applies them at once (D-24); a bootstrap key is refused as `bootstrap_setting`.
+
+`GET /doctor` runs the diagnostics in the service, and with `?stream=<id>` also resolves the
+stream's URL over each family and probes its formats. A failed probe says so, with the reason in
+the service log.
+
 ## CLI
 
 `dalsegno serve` runs the service. `DALSEGNO_URL` selects it, with `http://127.0.0.1:8737` as
@@ -59,7 +73,17 @@ dalsegno jobs
 dalsegno changes
 dalsegno start <id>
 dalsegno stop  <id>
+dalsegno doctor   [--stream <id>]
+dalsegno set      [<key>=<value>]... [--reset <key>]...
+dalsegno fetch    <id> --itag <n> --first <sq> --last <sq>
+dalsegno backfill <id> [--hours <n>]
+dalsegno features <id>
+dalsegno sweep
 ```
+
+`fetch`, `backfill`, `features` and `sweep` queue a job and print it, and `dalsegno jobs` follows
+it. `doctor --stream` also probes the stream, which can take a few minutes. `set` shows the
+shared operational settings, and changes them when given `key=value` or `--reset key`.
 
 A running job that reports progress shows its share done and, from its pace so far, about how
 long is left. So far only backfill reports, after each 500 fragments, and the API returns it as
@@ -82,17 +106,11 @@ dalsegno diff     --env <file> --period <s> --against <file> --against-period <s
 
 Envelope input accepts `.npy` so that existing Python results can be used directly.
 
-Until milestone 5 these commands run in process (D-17). All but `doctor` and `probe` need
-`--data-dir` or `DALSEGNO_DATA`:
+Until milestone 5 these commands run in process (D-17) and need `--data-dir` or
+`DALSEGNO_DATA`:
 
 ```text
-dalsegno doctor   [--stream <id>]
-dalsegno probe    <id>
 dalsegno add      <id>
-dalsegno fetch    <id> --itag <n> --first <sq> --last <sq> [--output <file>]
-dalsegno backfill <id> [--hours <n>]
-dalsegno features <id>
-dalsegno sweep
 dalsegno program    <id> --short-name <name> --output-dir <dir>
 dalsegno candidates <id> --time <s>
 dalsegno refine     <id> --boundary <s> --period <s>

@@ -4,6 +4,7 @@
 //! carry a stable code, and internals stay in the logs.
 
 use crate::events::{CAPACITY, EventBus};
+use crate::operations::{create_job, doctor, get_settings, put_settings};
 use crate::runner::now_ms;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::uri::Authority;
@@ -13,9 +14,10 @@ use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use dalsegno_app::acquisition::Library;
+use dalsegno_app::acquisition::{Acquisition, Library};
 use dalsegno_app::error::AcquireError;
 use dalsegno_app::fetch::{SharedDatabase, lock};
+use dalsegno_app::settings::LiveSettings;
 use dalsegno_store::database::Database;
 use dalsegno_store::jobs::{JobRow, JobState};
 use dalsegno_store::status::{ChangeStatus, Listing, RegionStatus, StreamStatus};
@@ -27,11 +29,23 @@ use tokio::task::spawn_blocking;
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 200;
 
+/// What the settings, diagnostics and job endpoints reach beyond the database.
+#[derive(Debug, Clone)]
+pub struct Services {
+    /// Runs the diagnostics and holds the request budget.
+    pub acquisition: Acquisition,
+    /// The operational settings in force.
+    pub settings: LiveSettings,
+    /// The bootstrap values as the settings screen shows them.
+    pub bootstrap: Value,
+}
+
 /// What the handlers share.
 #[derive(Debug, Clone)]
 pub struct ApiState {
     library: Library,
-    database: SharedDatabase,
+    pub(crate) database: SharedDatabase,
+    pub(crate) services: Services,
     /// The host of the public URL, which the proxy in front passes on.
     public_host: Option<String>,
     /// Live updates for the Web UI.
@@ -41,7 +55,7 @@ pub struct ApiState {
 impl ApiState {
     /// Makes the state. `public_url` is where the operator reaches the service, if anywhere
     /// beyond this machine.
-    pub fn new(library: Library, public_url: Option<&str>) -> Self {
+    pub fn new(library: Library, public_url: Option<&str>, services: Services) -> Self {
         let database = library.database();
         let public_host = public_url
             .and_then(|url| url.parse::<Uri>().ok())
@@ -56,6 +70,7 @@ impl ApiState {
             library,
             database,
             public_host,
+            services,
             events: EventBus::new(CAPACITY),
         }
     }
@@ -74,7 +89,7 @@ struct Meta {
 }
 
 #[derive(Debug, Serialize)]
-struct Envelope {
+pub(crate) struct Envelope {
     success: bool,
     data: Value,
     error: Option<ErrorBody>,
@@ -89,13 +104,13 @@ struct ErrorBody {
 
 /// A failed request, as the caller sees it.
 #[derive(Debug)]
-struct ApiError {
+pub(crate) struct ApiError {
     status: StatusCode,
     body: ErrorBody,
 }
 
 impl ApiError {
-    fn new(status: StatusCode, code: &'static str, message: &str) -> Self {
+    pub(crate) fn new(status: StatusCode, code: &'static str, message: &str) -> Self {
         Self {
             status,
             body: ErrorBody {
@@ -105,11 +120,11 @@ impl ApiError {
         }
     }
 
-    fn not_found() -> Self {
+    pub(crate) fn not_found() -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found", "no such item")
     }
 
-    fn internal(detail: &str) -> Self {
+    pub(crate) fn internal(detail: &str) -> Self {
         tracing::error!(detail, "request failed");
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -142,7 +157,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-fn ok(data: Value) -> Json<Envelope> {
+pub(crate) fn ok(data: Value) -> Json<Envelope> {
     Json(Envelope {
         success: true,
         data,
@@ -185,7 +200,7 @@ impl Paging {
 }
 
 /// Runs a read or write on a blocking thread.
-async fn with_database<T: Send + 'static>(
+pub(crate) async fn with_database<T: Send + 'static>(
     database: &SharedDatabase,
     work: impl FnOnce(&Database) -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
@@ -198,7 +213,7 @@ async fn with_database<T: Send + 'static>(
     .map_err(|error| ApiError::internal(&error.to_string()))?
 }
 
-fn store_error(error: impl ToString) -> ApiError {
+pub(crate) fn store_error(error: impl ToString) -> ApiError {
     ApiError::internal(&error.to_string())
 }
 
@@ -498,8 +513,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/streams/{id}/stop", post(stop_stream))
         .route("/changes", get(list_changes))
         .route("/changes/{id}", get(change_detail))
-        .route("/jobs", get(list_jobs))
+        .route("/jobs", get(list_jobs).post(create_job))
         .route("/jobs/{id}/cancel", post(cancel_job))
+        .route("/settings", get(get_settings).put(put_settings))
+        .route("/doctor", get(doctor))
         .route("/events", get(events));
     Router::new()
         .nest("/api/v1", api)
@@ -513,10 +530,14 @@ pub fn router(state: ApiState) -> Router {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
     use axum::http::Request;
+    use chrono::NaiveTime;
+    use dalsegno_app::acquisition::{AcquisitionOptions, IpPolicy};
+    use dalsegno_app::fetch::FetchLimits;
+    use dalsegno_app::settings::Operational;
     use dalsegno_store::jobs::{JobClass, NewJob};
     use dalsegno_store::streams::{NewStream, StreamState};
     use futures_util::StreamExt;
@@ -525,16 +546,37 @@ mod tests {
 
     const BODY_LIMIT: usize = 1 << 20;
 
-    struct Fixture {
+    pub(crate) struct Fixture {
         _root: TempDir,
-        state: ApiState,
-        stream: i64,
+        pub(crate) state: ApiState,
+        pub(crate) stream: i64,
     }
 
-    fn fixture() -> Fixture {
+    /// Settings that start from the defaults, with the daily summary at 09:00.
+    fn services(library: &Library) -> Services {
+        let base = Operational {
+            limits: FetchLimits::default(),
+            daily_summary: NaiveTime::from_hms_opt(9, 0, 0),
+        };
+        let (settings, _) = LiveSettings::load(base, library.database()).unwrap();
+        let acquisition = Acquisition::new(AcquisitionOptions {
+            policy: IpPolicy::V4Only,
+            cookies: None,
+            limits: FetchLimits::default(),
+        })
+        .unwrap();
+        Services {
+            acquisition,
+            settings,
+            bootstrap: json!({ "data": "/data", "webhook": true }),
+        }
+    }
+
+    pub(crate) fn fixture() -> Fixture {
         let root = tempdir().unwrap();
         let library = Library::open(root.path()).unwrap();
-        let state = ApiState::new(library, Some("https://dalsegno.example/"));
+        let services = services(&library);
+        let state = ApiState::new(library, Some("https://dalsegno.example/"), services);
         let stream = lock(&state.database)
             .unwrap()
             .insert_stream(&NewStream {
@@ -556,7 +598,7 @@ mod tests {
         }
     }
 
-    async fn send(fixture: &Fixture, request: Request<Body>) -> (StatusCode, Value) {
+    pub(crate) async fn send(fixture: &Fixture, request: Request<Body>) -> (StatusCode, Value) {
         let response = router(fixture.state.clone())
             .oneshot(request)
             .await
@@ -566,7 +608,7 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
-    async fn get_json(fixture: &Fixture, uri: &str) -> (StatusCode, Value) {
+    pub(crate) async fn get_json(fixture: &Fixture, uri: &str) -> (StatusCode, Value) {
         let request = Request::get(uri).body(Body::empty()).unwrap();
         send(fixture, request).await
     }

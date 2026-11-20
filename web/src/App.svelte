@@ -1,5 +1,8 @@
 <script lang="ts">
   import Placeholder from './lib/Placeholder.svelte'
+  import Dashboard from './screens/Dashboard.svelte'
+  import Jobs from './screens/Jobs.svelte'
+  import Settings from './screens/Settings.svelte'
   import { live } from './lib/live.svelte'
   import { followLink, router } from './lib/router.svelte'
   import type { Screen } from './lib/routes'
@@ -57,6 +60,14 @@
 </header>
 <main id="main" tabindex="-1">
   {#key router.path}
-    <Placeholder {title} />
+    {#if router.route.screen === 'dashboard'}
+      <Dashboard />
+    {:else if router.route.screen === 'jobs'}
+      <Jobs />
+    {:else if router.route.screen === 'settings'}
+      <Settings />
+    {:else}
+      <Placeholder {title} />
+    {/if}
   {/key}
 </main>

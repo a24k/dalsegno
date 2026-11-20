@@ -23,6 +23,15 @@ describe('createClient', () => {
     expect(init?.body).toBe('{"a":1}')
   })
 
+  test('puts a body as JSON', async () => {
+    const fetcher = answer(200, { success: true, data: { saved: true }, error: null, meta: null })
+    const data = await createClient(fetcher).put<{ saved: boolean }>('/settings', { a: null })
+    expect(data).toEqual({ saved: true })
+    const init = vi.mocked(fetcher).mock.calls[0][1]
+    expect(init?.method).toBe('PUT')
+    expect(init?.body).toBe('{"a":null}')
+  })
+
   test('raises the code and message the service gave', async () => {
     const error = { code: 'not_found', message: 'no such stream' }
     const fetcher = answer(404, { success: false, data: null, error, meta: null })

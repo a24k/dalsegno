@@ -89,13 +89,41 @@ impl ApiClient {
     pub async fn post(&self, path: &str) -> Result<Value, ApiCallError> {
         self.read(self.client.post(self.url(path))).await
     }
+
+    /// Sends a JSON body with a request, and returns the answer's data.
+    async fn send_json(
+        &self,
+        request: reqwest::RequestBuilder,
+        body: &Value,
+    ) -> Result<Value, ApiCallError> {
+        let request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_string());
+        self.read(request).await
+    }
+
+    /// Posts a JSON body, and returns the data.
+    pub async fn post_json(&self, path: &str, body: &Value) -> Result<Value, ApiCallError> {
+        self.send_json(self.client.post(self.url(path)), body).await
+    }
+
+    /// Puts a JSON body, and returns the data.
+    pub async fn put_json(&self, path: &str, body: &Value) -> Result<Value, ApiCallError> {
+        self.send_json(self.client.put(self.url(path)), body).await
+    }
+
+    /// Reads an endpoint that takes long to answer, waiting `wait` instead of the usual time.
+    pub async fn get_waiting(&self, path: &str, wait: Duration) -> Result<Value, ApiCallError> {
+        self.read(self.client.get(self.url(path)).timeout(wait))
+            .await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn answering(status: u16, body: Value) -> MockServer {
@@ -153,6 +181,72 @@ mod tests {
             .unwrap();
 
         assert_eq!(data, json!(1));
+    }
+
+    #[tokio::test]
+    async fn a_json_post_sends_its_body_and_content_type() {
+        let server = MockServer::start().await;
+        let body = json!({ "kind": "sweep" });
+        Mock::given(method("POST"))
+            .and(path("/api/v1/jobs"))
+            .and(header("content-type", "application/json"))
+            .and(body_json(&body))
+            .respond_with(ResponseTemplate::new(202).set_body_json(json!({ "data": { "id": 1 } })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let data = ApiClient::new(&server.uri())
+            .unwrap()
+            .post_json("/jobs", &body)
+            .await
+            .unwrap();
+
+        assert_eq!(data, json!({ "id": 1 }));
+    }
+
+    #[tokio::test]
+    async fn a_json_put_sends_its_body_and_content_type() {
+        let server = MockServer::start().await;
+        let body = json!({ "concurrency": 2, "daily_summary": null });
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/settings"))
+            .and(header("content-type", "application/json"))
+            .and(body_json(&body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": 1 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let data = ApiClient::new(&server.uri())
+            .unwrap()
+            .put_json("/settings", &body)
+            .await
+            .unwrap();
+
+        assert_eq!(data, json!(1));
+    }
+
+    #[tokio::test]
+    async fn a_slow_answer_is_waited_for_as_long_as_asked() {
+        let server = MockServer::start().await;
+        Mock::given(path("/api/v1/doctor"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "data": 1 }))
+                    .set_delay(Duration::from_millis(200)),
+            )
+            .mount(&server)
+            .await;
+        let client = ApiClient::new(&server.uri()).unwrap();
+
+        let short = client
+            .get_waiting("/doctor", Duration::from_millis(20))
+            .await;
+        let long = client.get_waiting("/doctor", Duration::from_secs(5)).await;
+
+        assert!(matches!(short, Err(ApiCallError::Unreachable(_))));
+        assert_eq!(long.unwrap(), json!(1));
     }
 
     #[tokio::test]

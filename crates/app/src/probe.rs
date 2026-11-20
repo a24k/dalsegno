@@ -13,7 +13,7 @@ use dalsegno_core::redact::Redacted;
 use dalsegno_core::stream::{IpFamily, VideoId, propose_short_name};
 use dalsegno_io::tools::{remux_video_to_mp4, video_keyframes};
 use dalsegno_io::ytdlp::{ResolveError, Resolver, StreamFormat, StreamInfo};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -34,7 +34,7 @@ pub struct ProbeTools {
 }
 
 /// A format that failed a check, and why.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rejection {
     /// Format number.
     pub itag: u32,
@@ -67,7 +67,7 @@ impl From<&str> for Failure {
 }
 
 /// What was learned about a stream. Holds no URL.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProbeReport {
     /// Stream title.
     pub title: String,

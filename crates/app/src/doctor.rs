@@ -5,7 +5,7 @@ use crate::fetch::FetchLimits;
 use dalsegno_core::stream::{IpFamily, IpPolicy, VideoId};
 use dalsegno_io::tools::{find_program, version};
 use dalsegno_io::ytdlp::Resolver;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const TOOLS: [(&str, &str); 3] = [
     ("yt-dlp", "--version"),
@@ -14,7 +14,7 @@ const TOOLS: [(&str, &str); 3] = [
 ];
 
 /// One external tool.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolStatus {
     /// Tool name.
     pub name: String,
@@ -25,7 +25,7 @@ pub struct ToolStatus {
 }
 
 /// URL resolution over one family.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionCheck {
     /// Family tried.
     pub family: IpFamily,
@@ -36,7 +36,7 @@ pub struct ResolutionCheck {
 }
 
 /// The `doctor` report.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DoctorReport {
     /// External tools.
     pub tools: Vec<ToolStatus>,

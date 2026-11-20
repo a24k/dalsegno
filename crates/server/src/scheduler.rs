@@ -5,6 +5,7 @@ use chrono::NaiveTime;
 use dalsegno_app::fetch::{SharedDatabase, lock};
 use dalsegno_app::lifecycle::StreamTarget;
 use dalsegno_app::notify::DEADLINE;
+use dalsegno_app::settings::Operational;
 use dalsegno_app::summary::enqueue_summary_if_due;
 use dalsegno_store::database::{Database, StoreError};
 use dalsegno_store::jobs::{JobClass, NewJob};
@@ -90,14 +91,15 @@ fn enqueue_due(database: &Database, summary: Option<NaiveTime>, now: i64) -> Res
     })
 }
 
-/// Looks at the schedule until `shutdown` turns true. `summary` is when the daily summary
-/// goes out, if it is on.
+/// Looks at the schedule until `shutdown` turns true. The daily summary goes out at the time
+/// the settings give when it looks, so a change applies from the next look on.
 pub async fn run_scheduler(
     database: SharedDatabase,
-    summary: Option<NaiveTime>,
+    settings: watch::Receiver<Operational>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     while !*shutdown.borrow() {
+        let summary = settings.borrow().daily_summary;
         let queued = lock(&database)
             .map_err(|error| error.to_string())
             .and_then(|database| enqueue_due(&database, summary, now_ms()));

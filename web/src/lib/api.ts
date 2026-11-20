@@ -50,6 +50,7 @@ async function readEnvelope(response: Response): Promise<Envelope<unknown>> {
 export interface Client {
   get<T>(path: string): Promise<Page<T>>
   post<T>(path: string, body?: unknown): Promise<T>
+  put<T>(path: string, body: unknown): Promise<T>
 }
 
 /** Builds a client. Tests hand it their own fetch. */
@@ -69,18 +70,24 @@ export function createClient(fetcher: Fetch = (...args) => fetch(...args)): Clie
     return envelope
   }
 
+  function send(path: string, method: string, body: unknown): Promise<Envelope<unknown>> {
+    return request(path, {
+      method,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+  }
+
   return {
     async get<T>(path: string): Promise<Page<T>> {
       const envelope = await request(path, { headers: { Accept: 'application/json' } })
       return { items: envelope.data as T, meta: envelope.meta }
     },
     async post<T>(path: string, body?: unknown): Promise<T> {
-      const envelope = await request(path, {
-        method: 'POST',
-        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      })
-      return envelope.data as T
+      return (await send(path, 'POST', body)).data as T
+    },
+    async put<T>(path: string, body: unknown): Promise<T> {
+      return (await send(path, 'PUT', body)).data as T
     },
   }
 }
