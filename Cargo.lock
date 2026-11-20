@@ -468,6 +468,7 @@ dependencies = [
  "dalsegno-app",
  "dalsegno-io",
  "dalsegno-store",
+ "futures-util",
  "rust-embed",
  "serde",
  "serde_json",

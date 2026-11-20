@@ -13,6 +13,7 @@ chrono.workspace = true
 dalsegno-app.workspace = true
 dalsegno-io.workspace = true
 dalsegno-store.workspace = true
+futures-util.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true

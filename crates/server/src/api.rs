@@ -3,11 +3,13 @@
 //! Handlers lock the database on a blocking thread, as a long feature run can hold it. Errors
 //! carry a stable code, and internals stay in the logs.
 
+use crate::events::{CAPACITY, EventBus};
 use crate::runner::now_ms;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::uri::Authority;
-use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
+use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
+use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -32,6 +34,8 @@ pub struct ApiState {
     database: SharedDatabase,
     /// The host of the public URL, which the proxy in front passes on.
     public_host: Option<String>,
+    /// Live updates for the Web UI.
+    events: EventBus,
 }
 
 impl ApiState {
@@ -52,7 +56,13 @@ impl ApiState {
             library,
             database,
             public_host,
+            events: EventBus::new(CAPACITY),
         }
+    }
+
+    /// The bus the event stream reads, for the watcher that fills it.
+    pub fn events(&self) -> EventBus {
+        self.events.clone()
     }
 }
 
@@ -198,7 +208,7 @@ fn stored(text: Option<&str>) -> Value {
         .unwrap_or(Value::Null)
 }
 
-fn stream_json(stream: &StreamStatus) -> Value {
+pub(crate) fn stream_json(stream: &StreamStatus) -> Value {
     json!({
         "id": stream.id,
         "video_id": stream.video_id,
@@ -213,7 +223,7 @@ fn stream_json(stream: &StreamStatus) -> Value {
     })
 }
 
-fn change_json(change: &ChangeStatus) -> Value {
+pub(crate) fn change_json(change: &ChangeStatus) -> Value {
     json!({
         "id": change.id,
         "program_id": change.program_id,
@@ -246,7 +256,7 @@ fn job_state(state: JobState) -> &'static str {
     }
 }
 
-fn job_json(job: &JobRow) -> Value {
+pub(crate) fn job_json(job: &JobRow) -> Value {
     json!({
         "id": job.id,
         "kind": job.job.kind,
@@ -393,6 +403,16 @@ async fn cancel_job(
     .await
 }
 
+/// Streams live updates. Proxies are asked not to buffer them, and the keep-alive comments
+/// hold the connection open through idle proxies.
+async fn events(State(state): State<ApiState>) -> impl IntoResponse {
+    let stream = Sse::new(state.events.subscribe()).keep_alive(KeepAlive::default());
+    (
+        [(HeaderName::from_static("x-accel-buffering"), "no")],
+        stream,
+    )
+}
+
 /// Returns whether a request comes from a page of another site. Browsers set `Origin` on such
 /// requests, and the CLI sends none.
 fn is_foreign(headers: &HeaderMap) -> bool {
@@ -479,7 +499,8 @@ pub fn router(state: ApiState) -> Router {
         .route("/changes", get(list_changes))
         .route("/changes/{id}", get(change_detail))
         .route("/jobs", get(list_jobs))
-        .route("/jobs/{id}/cancel", post(cancel_job));
+        .route("/jobs/{id}/cancel", post(cancel_job))
+        .route("/events", get(events));
     Router::new()
         .nest("/api/v1", api)
         .fallback(unknown_route)
@@ -498,6 +519,7 @@ mod tests {
     use axum::http::Request;
     use dalsegno_store::jobs::{JobClass, NewJob};
     use dalsegno_store::streams::{NewStream, StreamState};
+    use futures_util::StreamExt;
     use tempfile::{TempDir, tempdir};
     use tower::ServiceExt;
 
@@ -630,6 +652,30 @@ mod tests {
         // The build may or may not be there, but either way the answer is not the API's.
         let mime = response.headers().get(header::CONTENT_TYPE).unwrap();
         assert!(!mime.to_str().unwrap().starts_with("application/json"));
+    }
+
+    #[tokio::test]
+    async fn the_event_stream_carries_what_is_published() {
+        let fixture = fixture();
+        let request = Request::get("/api/v1/events").body(Body::empty()).unwrap();
+
+        let response = router(fixture.state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        fixture.state.events().publish(
+            crate::events::Topic::Stream,
+            json!({ "id": fixture.stream }),
+        );
+        let headers = response.headers().clone();
+        let mut body = response.into_body().into_data_stream();
+        let chunk = body.next().await.unwrap().unwrap();
+
+        assert_eq!(headers[header::CONTENT_TYPE], "text/event-stream");
+        assert_eq!(headers["x-accel-buffering"], "no");
+        let text = String::from_utf8(chunk.to_vec()).unwrap();
+        assert!(text.contains("event: stream.state\n"));
+        assert!(text.contains(&format!("{{\"id\":{}}}", fixture.stream)));
     }
 
     #[tokio::test]
