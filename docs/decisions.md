@@ -248,6 +248,12 @@ address, cookie file, Plex token, webhook URL. Operational values (rate limits, 
 thresholds, disk floor) start from there and can be overridden in a `settings` table. The
 API rejects any attempt to change a bootstrap key.
 
+Applied (2026-11-20): the operational keys are `concurrency` and `requests_per_second`, the
+request budget every stream and job shares, and `daily_summary`. A change applies at once, to
+the requests that start from then on and to the next look at the schedule, and a null puts a key
+back to the value from the file, environment or flags. Other thresholds join the table when
+someone needs to change them.
+
 ### D-25 Notifications and analysis progress are durable
 
 Hourly analysis and alerts must survive a crash, or the operator silently misses a change

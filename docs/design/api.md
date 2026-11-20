@@ -46,6 +46,20 @@ the object the jobs, streams or changes list returns for that ID, sent when it i
 differs, within about a second. A `resync` event tells a page that fell behind to refetch, as
 it does whenever its connection opens; the Web UI reconnects with a backoff from 1 s to 30 s.
 
+`POST /jobs` takes `{"kind": ...}` with `backfill` (`stream`, optional `hours` up to 120),
+`features`, `analysis` (`stream`), `sweep`, or `fetch` (`stream`, `itag`, `first`, `last`, at
+most 100000 fragments into the library), and answers `202` with the queued job. Stream IDs are
+the numeric IDs of `/streams`.
+
+`GET /settings` gives each operational setting with its `value`, the `default` from the file,
+environment or flags, and whether it is `overridden`, and the bootstrap values with secrets and
+the cookie file only as set or not. `PUT /settings` takes the keys to change, or null to drop an
+override, and applies them at once (D-24); a bootstrap key is refused as `bootstrap_setting`.
+
+`GET /doctor` runs the diagnostics in the service, and with `?stream=<id>` also resolves the
+stream's URL over each family and probes its formats. A failed probe says so, with the reason in
+the service log.
+
 ## CLI
 
 `dalsegno serve` runs the service. `DALSEGNO_URL` selects it, with `http://127.0.0.1:8737` as
