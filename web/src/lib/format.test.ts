@@ -48,7 +48,13 @@ describe('numbers', () => {
     expect(percent(null)).toBeNull()
     expect(percent(0.426)).toBe('43%')
     expect(period(null)).toBe('No period yet')
-    expect(period(1800.04)).toBe('1800.0 s')
     expect(holes(12, 0)).toBe('12 to fill, 0 lost')
+  })
+
+  test('give a period in hours and minutes with the exact seconds', () => {
+    expect(period(42244.8)).toBe('11 h 44 min (42244.8 s)')
+    expect(period(7200)).toBe('2 h (7200.0 s)')
+    expect(period(1800.04)).toBe('30 min (1800.0 s)')
+    expect(period(12.5)).toBe('12.5 s')
   })
 })

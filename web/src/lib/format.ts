@@ -62,9 +62,20 @@ export function percent(progress: number | null): string | null {
   return progress === null ? null : `${Math.round(progress * 100)}%`
 }
 
-/** A loop period, or that none is known yet. */
+/** A loop period in hours and minutes with the exact seconds, or that none is known yet. */
 export function period(seconds: number | null): string {
-  return seconds === null ? 'No period yet' : `${seconds.toFixed(1)} s`
+  if (seconds === null) {
+    return 'No period yet'
+  }
+  const exact = `${seconds.toFixed(1)} s`
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 1) {
+    return exact
+  }
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  const rounded = hours === 0 ? `${rest} min` : rest === 0 ? `${hours} h` : `${hours} h ${rest} min`
+  return `${rounded} (${exact})`
 }
 
 /** A stream's holes, as `dalsegno status` gives them. */
