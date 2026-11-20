@@ -129,6 +129,15 @@ impl Database {
             .optional()?)
     }
 
+    /// Changes the title of a stream.
+    pub fn set_stream_title(&self, stream_id: i64, title: &str) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE streams SET title = ?2 WHERE id = ?1",
+            params![stream_id, title],
+        )?;
+        Ok(())
+    }
+
     /// Returns the stream with this row ID.
     pub fn stream(&self, stream_id: i64) -> Result<Option<StreamRow>, StoreError> {
         let sql = format!("SELECT {STREAM_COLUMNS} FROM streams WHERE id = ?1");
@@ -284,5 +293,216 @@ pub(crate) mod tests {
             .query_row("SELECT last_fetch_at FROM streams", [], |row| row.get(0))
             .unwrap();
         assert_eq!(at, 5_000);
+    }
+
+    #[test]
+    fn a_title_can_be_changed() {
+        let database = Database::open_in_memory().unwrap();
+        let id = database.insert_stream(&new_stream("abcDEF123_-")).unwrap();
+
+        database.set_stream_title(id, "Renamed").unwrap();
+
+        assert_eq!(
+            database.stream(id).unwrap().unwrap().stream.title,
+            "Renamed"
+        );
+    }
+
+    fn database() -> (Database, i64) {
+        let database = Database::open_in_memory().unwrap();
+        let id = database.insert_stream(&new_stream("abcDEF123_-")).unwrap();
+        (database, id)
+    }
+
+    #[test]
+    fn a_stream_is_found_by_its_row_id() {
+        let (database, id) = database();
+
+        let row = database.stream(id).unwrap().unwrap();
+
+        assert_eq!(
+            row,
+            StreamRow {
+                id,
+                stream: new_stream("abcDEF123_-")
+            }
+        );
+        assert_eq!(database.stream(id + 1).unwrap(), None);
+    }
+
+    #[test]
+    fn a_stream_is_registered_in_the_registered_state_without_a_reason() {
+        let (database, id) = database();
+
+        let state = database.stream_state(id).unwrap();
+
+        assert_eq!(state, Some((StreamState::Registered, None)));
+    }
+
+    #[test]
+    fn a_stream_state_is_stored_with_its_reason() {
+        let (database, id) = database();
+
+        database
+            .set_stream_state(id, StreamState::Paused, Some("by request"))
+            .unwrap();
+
+        assert_eq!(
+            database.stream_state(id).unwrap(),
+            Some((StreamState::Paused, Some("by request".to_string())))
+        );
+    }
+
+    #[test]
+    fn moving_a_stream_without_a_reason_clears_the_old_one() {
+        let (database, id) = database();
+        database
+            .set_stream_state(id, StreamState::Error, Some("offline"))
+            .unwrap();
+
+        database
+            .set_stream_state(id, StreamState::Recording, None)
+            .unwrap();
+
+        assert_eq!(
+            database.stream_state(id).unwrap(),
+            Some((StreamState::Recording, None))
+        );
+    }
+
+    #[test]
+    fn the_state_of_an_unknown_stream_is_none() {
+        let (database, id) = database();
+
+        assert_eq!(database.stream_state(id + 1).unwrap(), None);
+    }
+
+    #[test]
+    fn an_unknown_state_name_is_an_error() {
+        assert!(StreamState::parse("bogus").is_err());
+    }
+
+    #[test]
+    fn every_state_round_trips_through_its_name() {
+        let states = [
+            StreamState::Registered,
+            StreamState::Backfilling,
+            StreamState::Recording,
+            StreamState::Paused,
+            StreamState::Error,
+            StreamState::Ended,
+        ];
+
+        for state in states {
+            assert_eq!(StreamState::parse(state.as_str()).unwrap(), state);
+        }
+    }
+
+    #[test]
+    fn streams_in_the_wanted_states_come_back_oldest_first() {
+        let (database, first) = database();
+        let second = database.insert_stream(&new_stream("bbbBBB222_-")).unwrap();
+        let third = database.insert_stream(&new_stream("cccCCC333_-")).unwrap();
+        database
+            .set_stream_state(first, StreamState::Recording, None)
+            .unwrap();
+        database
+            .set_stream_state(third, StreamState::Backfilling, None)
+            .unwrap();
+
+        let rows = database
+            .streams_in_states(&[StreamState::Backfilling, StreamState::Recording])
+            .unwrap();
+
+        let ids: Vec<i64> = rows.iter().map(|row| row.id).collect();
+        assert_eq!(ids, [first, third]);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn no_wanted_states_match_no_streams() {
+        let (database, _) = database();
+
+        assert_eq!(database.streams_in_states(&[]).unwrap(), []);
+        assert_eq!(
+            database.streams_in_states(&[StreamState::Ended]).unwrap(),
+            []
+        );
+    }
+
+    #[test]
+    fn a_stream_has_no_follow_sq_until_one_is_set() {
+        let (database, id) = database();
+
+        assert_eq!(database.follow_sq(id).unwrap(), None);
+        assert_eq!(database.follow_sq(id + 1).unwrap(), None);
+    }
+
+    #[test]
+    fn a_follow_sq_is_stored() {
+        let (database, id) = database();
+
+        database.set_follow_sq(id, 12_345).unwrap();
+
+        assert_eq!(database.follow_sq(id).unwrap(), Some(12_345));
+    }
+
+    #[test]
+    fn advancing_the_follow_moves_it_and_ends_backfilling() {
+        let (database, id) = database();
+        database
+            .set_stream_state(id, StreamState::Backfilling, None)
+            .unwrap();
+
+        database.advance_follow(id, 77).unwrap();
+
+        assert_eq!(database.follow_sq(id).unwrap(), Some(77));
+        assert_eq!(
+            database.stream_state(id).unwrap().map(|(state, _)| state),
+            Some(StreamState::Recording)
+        );
+    }
+
+    #[test]
+    fn advancing_the_follow_leaves_a_stopped_stream_stopped() {
+        let (database, id) = database();
+        database
+            .set_stream_state(id, StreamState::Paused, Some("by request"))
+            .unwrap();
+
+        database.advance_follow(id, 77).unwrap();
+
+        assert_eq!(database.follow_sq(id).unwrap(), Some(77));
+        assert_eq!(
+            database.stream_state(id).unwrap(),
+            Some((StreamState::Paused, Some("by request".to_string())))
+        );
+    }
+
+    #[test]
+    fn a_stream_has_no_last_fetch_until_one_is_recorded() {
+        let (database, id) = database();
+
+        let at: Option<i64> = database
+            .connection()
+            .query_row(
+                "SELECT last_fetch_at FROM streams WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(at, None);
+    }
+
+    #[test]
+    fn a_later_title_replaces_an_earlier_one_and_is_found_by_video_id() {
+        let (database, id) = database();
+        database.set_stream_title(id, "First").unwrap();
+
+        database.set_stream_title(id, "Second").unwrap();
+
+        let row = database.stream_by_video_id("abcDEF123_-").unwrap().unwrap();
+        assert_eq!(row.stream.title, "Second");
     }
 }

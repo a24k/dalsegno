@@ -10,21 +10,21 @@ use serde_json::{Map, Value, json};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// As many rows as one page of the API holds.
-const PAGE: &str = "?limit=200";
+pub(crate) const PAGE: &str = "?limit=200";
 const MINUTE_MS: i64 = 60_000;
 const MINUTES_PER_HOUR: i64 = 60;
 /// How long `doctor` waits, since a probe fetches real fragments over each family.
 const DOCTOR_WAIT: Duration = Duration::from_secs(5 * 60);
 
-fn text<'a>(row: &'a Value, key: &str) -> &'a str {
+pub(crate) fn text<'a>(row: &'a Value, key: &str) -> &'a str {
     row[key].as_str().unwrap_or("-")
 }
 
-fn rows(data: &Value) -> &[Value] {
+pub(crate) fn rows(data: &Value) -> &[Value] {
     data.as_array().map_or(&[], Vec::as_slice)
 }
 
-fn stream_line(row: &Value) -> String {
+pub(crate) fn stream_line(row: &Value) -> String {
     let period = row["period"]
         .as_f64()
         .map_or("no period".to_string(), |period| format!("{period:.1} s"));
@@ -100,7 +100,11 @@ fn change_line(row: &Value) -> String {
     )
 }
 
-fn print_rows(json: bool, data: &Value, line: impl Fn(&Value) -> String) -> anyhow::Result<()> {
+pub(crate) fn print_rows(
+    json: bool,
+    data: &Value,
+    line: impl Fn(&Value) -> String,
+) -> anyhow::Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(data)?);
     } else {
@@ -138,13 +142,13 @@ fn row_id(data: &Value, video_id: &str) -> Option<i64> {
 }
 
 /// Finds the numeric ID of a stream from its video ID or URL.
-async fn stream_id(client: &ApiClient, stream: &str) -> anyhow::Result<i64> {
+pub(crate) async fn stream_id(client: &ApiClient, stream: &str) -> anyhow::Result<i64> {
     let video_id = video_id_of(stream)?;
     let streams = client.get(&format!("/streams{PAGE}")).await?;
     row_id(&streams, &video_id).ok_or_else(|| anyhow!("stream {video_id} is not registered"))
 }
 
-fn print_json(data: &Value) -> anyhow::Result<()> {
+pub(crate) fn print_json(data: &Value) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(data)?);
     Ok(())
 }

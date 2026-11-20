@@ -20,10 +20,11 @@
 | --- | --- | --- |
 | Register stream | `POST /streams` | `dalsegno add <id>` |
 | List streams | `GET /streams` | `dalsegno status` |
-| Stream detail, edit | `GET`, `PATCH /streams/{id}` | `dalsegno set` |
+| Stream detail, edit | `GET`, `PATCH /streams/{id}` | `dalsegno set --stream` |
 | Start, stop | `POST /streams/{id}/start`, `/stop` | `dalsegno start`, `stop` |
 | Link to program | `POST /streams/{id}/link` | `dalsegno link <id> <program>` |
-| Program detail, edit | `GET`, `PUT /programs/{id}` | `dalsegno set` |
+| List, create programs | `GET`, `POST /programs` | `dalsegno programs`, `program` |
+| Program detail, edit | `GET`, `PUT /programs/{id}` | `dalsegno program`, `set --program` |
 | Versions | `GET /programs/{id}/versions` | `dalsegno versions` |
 | Changes | `GET /changes`, `GET /programs/{id}/changes` | `dalsegno scan` |
 | Change detail | `GET /changes/{id}` | `dalsegno diff` |
@@ -35,7 +36,7 @@
 | Preview | `GET /clips/{id}/preview` (Range) | n/a |
 | Contact sheet | `GET /clips/{id}/sheet` | n/a |
 | Export, transfer | `POST /clips/{id}/export` | `dalsegno cut`, `publish` |
-| Known material | `GET`, `POST`, `DELETE /programs/{id}/known-clips` | `dalsegno known` |
+| Known material | `GET`, `POST /programs/{id}/known-clips`, `DELETE /programs/{id}/known-clips/{clip}` | `dalsegno known` |
 | Jobs | `GET`, `POST /jobs`, `POST /jobs/{id}/cancel` | `dalsegno jobs`, `fetch` |
 | Settings | `GET`, `PUT /settings` | `dalsegno set` |
 | Diagnostics | `GET /doctor` | `dalsegno doctor` |
@@ -51,6 +52,23 @@ it does whenever its connection opens; the Web UI reconnects with a backoff from
 most 100000 fragments into the library), and answers `202` with the queued job. Stream IDs are
 the numeric IDs of `/streams`.
 
+`POST /streams` takes `{"stream": <video ID or URL>}`, waits for the probe, which can take
+minutes, and answers `201` with the `stream` and the `probe`. A stream already registered is a
+`409` `already_registered`, audio that does not pass its checks a `422` `no_audio`, and any
+other failed probe a `502` `probe_failed` with the reason in the service log. `PATCH
+/streams/{id}` takes `{"title"}` of 1 to 300 characters. `POST /streams/{id}/link` takes
+`{"program": <id>}` and is refused with `409` when the program has versions from another
+stream, which analysis cannot continue yet, or when the stream already has versions under its
+own program. A program is `short_name`, `output_dir`, `name_template`, `addition_suffix`,
+`artist`, `content_date` and `description`, the first two required and the template and suffix
+defaulting; `POST` answers `201` and `PUT` replaces the whole of it, and each answer adds the
+`stream_ids` linked to it. The folder and the template are checked before anything is stored.
+`GET /programs/{id}/versions` and `/changes` page newest first. A stream stores a known clip
+from its envelope with `POST /programs/{id}/known-clips`, which takes `name`, `stream`, `start`
+and `end` in stream time, at most 1800 s long, and is refused with `409` where the stored
+envelope does not cover the stretch. Known clips are stored now, and analysis masks them from
+M7.
+
 `GET /settings` gives each operational setting with its `value`, the `default` from the file,
 environment or flags, and whether it is `overridden`, and the bootstrap values with secrets and
 the cookie file only as set or not. `PUT /settings` takes the keys to change, or null to drop an
@@ -65,7 +83,7 @@ the service log.
 `dalsegno serve` runs the service. `DALSEGNO_URL` selects it, with `http://127.0.0.1:8737` as
 default. Output is human-readable by default, or `--json` for scripts.
 
-So far `status`, `jobs`, `changes`, `start` and `stop` go through the service, and need it running:
+These go through the service, and need it running:
 
 ```text
 dalsegno status
@@ -73,8 +91,17 @@ dalsegno jobs
 dalsegno changes
 dalsegno start <id>
 dalsegno stop  <id>
+dalsegno add      <id>
+dalsegno program  <id> --short-name <name> --output-dir <dir> [--template <t>] [--suffix <s>]
+                  [--artist <a>] [--date <d>] [--description <d>]
+dalsegno programs
+dalsegno link     <id> <program>
+dalsegno versions <program>
+dalsegno known    <program> [--add <name> --stream <id> --from <s> --to <s>] [--remove <clip>]
 dalsegno doctor   [--stream <id>]
 dalsegno set      [<key>=<value>]... [--reset <key>]...
+dalsegno set      --stream <id> title=<title>
+dalsegno set      --program <program> <key>=<value>...
 dalsegno fetch    <id> --itag <n> --first <sq> --last <sq>
 dalsegno backfill <id> [--hours <n>]
 dalsegno features <id>
@@ -82,8 +109,11 @@ dalsegno sweep
 ```
 
 `fetch`, `backfill`, `features` and `sweep` queue a job and print it, and `dalsegno jobs` follows
-it. `doctor --stream` also probes the stream, which can take a few minutes. `set` shows the
-shared operational settings, and changes them when given `key=value` or `--reset key`.
+it. `doctor --stream` and `add` probe the stream, which can take a few minutes. `set` shows the
+shared operational settings, and changes them when given `key=value` or `--reset key`. With
+`--stream` it changes a stream's title, and with `--program` the given fields of a program,
+which cannot go with `--reset`. `program` changes the program a stream has, or makes one and
+links it, and `known` lists a program's known clips.
 
 A running job that reports progress shows its share done and, from its pace so far, about how
 long is left. So far only backfill reports, after each 500 fragments, and the API returns it as
@@ -110,8 +140,6 @@ Until milestone 5 these commands run in process (D-17) and need `--data-dir` or
 `DALSEGNO_DATA`:
 
 ```text
-dalsegno add      <id>
-dalsegno program    <id> --short-name <name> --output-dir <dir>
 dalsegno candidates <id> --time <s>
 dalsegno refine     <id> --boundary <s> --period <s>
 dalsegno cut        <id> --kind <kind> --start-sq <sq> --duration <s> --named-at <unix>
