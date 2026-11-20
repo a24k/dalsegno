@@ -2,7 +2,7 @@
   import { ago, holes, percent, period, timeLeft } from '../lib/format'
   import ListState from '../lib/ListState.svelte'
   import { Clock, LiveList } from '../lib/live-list.svelte'
-  import { isOpen, type Change, type Job, type Stream } from '../lib/types'
+  import { byDeadline, type Change, type Job, type Stream } from '../lib/types'
 
   const LIST_LIMIT = 200
   const RECENT_JOBS = 10
@@ -20,7 +20,7 @@
   let titles = $derived(
     Object.fromEntries(streams.items.map((stream) => [stream.id, stream.title])),
   )
-  let openChanges = $derived(changes.items.filter(isOpen))
+  let grouped = $derived(byDeadline(changes.items, clock.now))
 </script>
 
 <h1>Dashboard</h1>
@@ -58,34 +58,43 @@
   </ListState>
 </section>
 
+{#snippet changeTable(items: Change[])}
+  <table>
+    <thead>
+      <tr>
+        <th scope="col">Change</th>
+        <th scope="col">Stream</th>
+        <th scope="col">State</th>
+        <th scope="col">Seen</th>
+        <th scope="col">DVR</th>
+      </tr>
+    </thead>
+    <tbody>
+      {#each items as change (change.id)}
+        <tr>
+          <th scope="row"><a href="/changes/{change.id}">Change {change.id}</a></th>
+          <td>{titles[change.stream_id] ?? `Stream ${change.stream_id}`}</td>
+          <td><span class="state" data-state={change.state}>{change.state}</span></td>
+          <td>{ago(change.detected_at, clock.now)}</td>
+          <td>{timeLeft(change.dvr_deadline_at, clock.now)}</td>
+        </tr>
+      {/each}
+    </tbody>
+  </table>
+{/snippet}
+
 <section aria-labelledby="changes-heading">
   <h2 id="changes-heading">Open changes</h2>
-  <ListState list={changes} items={openChanges} empty="No change is waiting.">
+  <ListState list={changes} items={grouped.pending} empty="No change is waiting.">
     {#snippet children(items)}
-      <table>
-        <thead>
-          <tr>
-            <th scope="col">Change</th>
-            <th scope="col">Stream</th>
-            <th scope="col">State</th>
-            <th scope="col">Seen</th>
-            <th scope="col">DVR</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each items as change (change.id)}
-            <tr>
-              <th scope="row"><a href="/changes/{change.id}">Change {change.id}</a></th>
-              <td>{titles[change.stream_id] ?? `Stream ${change.stream_id}`}</td>
-              <td><span class="state" data-state={change.state}>{change.state}</span></td>
-              <td>{ago(change.detected_at, clock.now)}</td>
-              <td>{timeLeft(change.dvr_deadline_at, clock.now)}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+      {@render changeTable(items)}
     {/snippet}
   </ListState>
+  {#if grouped.missed.length > 0}
+    <h3 id="missed-heading">Past the deadline</h3>
+    <p class="muted">Their DVR deadline has passed, so the DVR may no longer hold all of them.</p>
+    {@render changeTable(grouped.missed)}
+  {/if}
 </section>
 
 <section aria-labelledby="jobs-heading">
