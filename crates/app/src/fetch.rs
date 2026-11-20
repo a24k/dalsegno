@@ -11,7 +11,7 @@ use dalsegno_io::http::FragmentResponse;
 use dalsegno_io::ytdlp::Resolver;
 use dalsegno_store::database::Database;
 use dalsegno_store::fragments::{FragmentRow, HeadSample};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, MutexGuard};
@@ -39,7 +39,7 @@ pub struct FetchRange {
 }
 
 /// Request limits. Defaults stay under the measured ceiling of about 5 per second.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FetchLimits {
     /// Requests in flight.
     pub concurrency: usize,

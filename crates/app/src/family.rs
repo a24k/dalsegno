@@ -1,7 +1,7 @@
 //! The IP family policy. One active family, switched as a unit with its leases (FR-A3, FR-A4).
 
 use dalsegno_core::stream::{IpFamily, IpPolicy};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -9,7 +9,7 @@ const BASE_AVOIDANCE_SECONDS: u64 = 6 * 3600;
 const MAX_AVOIDANCE_SECONDS: u64 = 96 * 3600;
 
 /// Why the active family changed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SwitchReason {
     /// The origin asked for a bot check.
@@ -21,7 +21,7 @@ pub enum SwitchReason {
 }
 
 /// One recorded switch, for `doctor` and the UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FamilySwitch {
     /// Unix seconds.
     pub at: u64,

@@ -1,12 +1,12 @@
 //! Choosing formats from what a stream offers (FR-S3, D-15).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
 const AAC_LC: &str = "mp4a.40.2";
 
 /// One format offered by a stream. Holds no URL.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FormatInfo {
     /// Format number.
     pub itag: u32,

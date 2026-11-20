@@ -2,9 +2,8 @@
 
 use anyhow::{anyhow, bail};
 use clap::{Parser, Subcommand};
-use dalsegno_app::acquisition::{Acquisition, AcquisitionOptions, FetchRequest, Library};
+use dalsegno_app::acquisition::{Acquisition, AcquisitionOptions, Library};
 use dalsegno_app::analysis::PeriodConfig;
-use dalsegno_app::backfill::DEFAULT_HOURS;
 use dalsegno_app::config::Config;
 use dalsegno_app::export::{
     AirTime, CutRequest, DEFAULT_SUFFIX, DEFAULT_TEMPLATE, ExportKind, NewProgram, Ownership,
@@ -13,12 +12,13 @@ use dalsegno_app::export::{
 use dalsegno_app::fetch::FetchLimits;
 use dalsegno_app::offline::{self, DiffRequest};
 use dalsegno_app::remote::ApiClient;
+use remote::JobRequest;
 use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use text::{
-    add_text, backfill_text, candidates_text, cut_text, diff_text, doctor_text, features_text,
-    fetch_text, period_text, probe_text, publish_text, refine_text, scan_text, sweep_text,
+    add_text, candidates_text, cut_text, diff_text, period_text, publish_text, refine_text,
+    scan_text,
 };
 use tracing_subscriber::filter::LevelFilter;
 
@@ -94,23 +94,27 @@ enum Command {
         /// Video ID or URL.
         stream: String,
     },
-    /// Report tools, IPv6 route and IP family, and test URL resolution for a stream.
+    /// Report tools, IPv6 route and IP family from the running service, and with a stream
+    /// resolve its URL over each family and probe its formats.
     Doctor {
-        /// Video ID or URL to resolve over each family.
+        /// Video ID or URL to resolve over each family and probe.
         #[arg(long)]
         stream: Option<String>,
     },
-    /// Read a stream's metadata and choose its formats by checking real fragments.
-    Probe {
-        /// Video ID or URL.
-        stream: String,
+    /// Show the shared settings, after changing them when given KEY=VALUE or --reset.
+    Set {
+        /// Setting to change, as KEY=VALUE, such as concurrency=2 or daily_summary=09:00.
+        pairs: Vec<String>,
+        /// Setting whose override to drop.
+        #[arg(long = "reset", value_name = "KEY")]
+        resets: Vec<String>,
     },
     /// Probe a stream and register it.
     Add {
         /// Video ID or URL.
         stream: String,
     },
-    /// Fetch a range of fragments. Stored fragments are skipped, so a rerun resumes.
+    /// Queue a fetch of a range of fragments. Stored fragments are skipped, so a rerun resumes.
     Fetch {
         /// Video ID or URL.
         stream: String,
@@ -123,24 +127,21 @@ enum Command {
         /// Last sq, inclusive.
         #[arg(long)]
         last: u64,
-        /// Join the range into this file once it is complete.
-        #[arg(long)]
-        output: Option<PathBuf>,
     },
-    /// Fill the recent past of a stream's audio from the DVR, oldest first.
+    /// Queue filling the recent past of a stream's audio from the DVR, oldest first.
     Backfill {
         /// Video ID or URL.
         stream: String,
-        /// How far back to reach.
-        #[arg(long, default_value_t = DEFAULT_HOURS)]
-        hours: f64,
+        /// How far back to reach. The service default is 24 hours.
+        #[arg(long)]
+        hours: Option<f64>,
     },
-    /// Bring a stream's envelope up to date with its stored audio.
+    /// Queue bringing a stream's envelope up to date with its stored audio.
     Features {
         /// Video ID or URL.
         stream: String,
     },
-    /// Remove fragments past retention and repair differences between files and rows.
+    /// Queue removing fragments past retention and repairing differences between files and rows.
     Sweep,
     /// Build an envelope file from numbered fragment files.
     Envelope {
@@ -341,6 +342,38 @@ async fn run_remote(command: Command, url: &str, json: bool) -> anyhow::Result<O
         Command::Stop { stream } => {
             remote::stream_action(&client()?, &stream, "stop", json).await?;
         }
+        Command::Doctor { stream } => {
+            remote::doctor(&client()?, stream.as_deref(), json).await?;
+        }
+        Command::Set { pairs, resets } => {
+            remote::set(&client()?, &pairs, &resets, json).await?;
+        }
+        Command::Backfill { stream, hours } => {
+            let request = JobRequest::Backfill {
+                stream: &stream,
+                hours,
+            };
+            remote::queue(&client()?, &request, json).await?;
+        }
+        Command::Features { stream } => {
+            let request = JobRequest::Features { stream: &stream };
+            remote::queue(&client()?, &request, json).await?;
+        }
+        Command::Sweep => remote::queue(&client()?, &JobRequest::Sweep, json).await?,
+        Command::Fetch {
+            stream,
+            itag,
+            first,
+            last,
+        } => {
+            let request = JobRequest::Fetch {
+                stream: &stream,
+                itag,
+                first,
+                last,
+            };
+            remote::queue(&client()?, &request, json).await?;
+        }
         other => return Ok(Some(other)),
     }
     Ok(None)
@@ -407,31 +440,9 @@ async fn main() -> anyhow::Result<()> {
         None => anyhow::Result::Err(anyhow!("this command needs --data-dir or DALSEGNO_DATA")),
     };
     match command {
-        Command::Doctor { stream } => {
-            let report = acquisition.doctor(stream.as_deref()).await?;
-            print_report(cli.json, &report, doctor_text)
-        }
-        Command::Probe { stream } => {
-            let report = acquisition.probe(&stream).await?;
-            print_report(cli.json, &report, probe_text)
-        }
         Command::Add { stream } => {
             let report = acquisition.add(&library()?, &stream).await?;
             print_report(cli.json, &report, add_text)
-        }
-        Command::Backfill { stream, hours } => {
-            let report = acquisition
-                .backfill(&library()?, &stream, hours, &|_| {})
-                .await?;
-            print_report(cli.json, &report, backfill_text)
-        }
-        Command::Features { stream } => {
-            let report = library()?.features(&stream).await?;
-            print_report(cli.json, &report, features_text)
-        }
-        Command::Sweep => {
-            let report = library()?.sweep().await?;
-            print_report(cli.json, &report, sweep_text)
         }
         Command::Program {
             stream,
@@ -550,32 +561,13 @@ async fn main() -> anyhow::Result<()> {
         | Command::Jobs
         | Command::Changes
         | Command::Start { .. }
-        | Command::Stop { .. } => Ok(()),
-        Command::Fetch {
-            stream,
-            itag,
-            first,
-            last,
-            output,
-        } => {
-            let request = FetchRequest {
-                stream,
-                itag,
-                first,
-                last,
-                output,
-            };
-            let report = acquisition.fetch(&library()?, request).await?;
-            print_report(cli.json, &report, fetch_text)?;
-            if !report.is_complete() {
-                bail!(
-                    "range incomplete: {} lost, {} failed",
-                    report.lost.len(),
-                    report.failed.len()
-                );
-            }
-            Ok(())
-        }
+        | Command::Stop { .. }
+        | Command::Doctor { .. }
+        | Command::Set { .. }
+        | Command::Backfill { .. }
+        | Command::Features { .. }
+        | Command::Sweep
+        | Command::Fetch { .. } => Ok(()),
     }
 }
 
@@ -648,7 +640,6 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use clap::error::ErrorKind;
-    use dalsegno_app::fetch::FetchReport;
 
     #[test]
     fn cli_definition_is_valid() {
@@ -671,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_takes_a_range_and_an_output() {
+    fn fetch_takes_a_range() {
         let cli = Cli::try_parse_from([
             "dalsegno",
             "fetch",
@@ -682,23 +673,46 @@ mod tests {
             "1",
             "--last",
             "2",
-            "--data-dir",
-            "/data",
-            "--output",
-            "/tmp/out",
-            "--ip-policy",
-            "v4-only",
         ])
         .unwrap();
 
-        let Some(Command::Fetch {
-            itag, last, output, ..
-        }) = cli.command
-        else {
+        let Some(Command::Fetch { itag, last, .. }) = cli.command else {
             panic!("expected fetch");
         };
         assert_eq!((itag, last), (140, 2));
-        assert_eq!(output, Some(PathBuf::from("/tmp/out")));
+    }
+
+    #[test]
+    fn backfill_hours_are_optional() {
+        let hours = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Some(Command::Backfill { hours, .. }) => hours,
+            _ => panic!("expected backfill"),
+        };
+
+        assert_eq!(hours(&["dalsegno", "backfill", "abcDEF123_-"]), None);
+        assert_eq!(
+            hours(&["dalsegno", "backfill", "abcDEF123_-", "--hours", "6"]),
+            Some(6.0)
+        );
+    }
+
+    #[test]
+    fn set_takes_pairs_and_resets() {
+        let cli = Cli::try_parse_from([
+            "dalsegno",
+            "set",
+            "concurrency=2",
+            "--reset",
+            "daily_summary",
+            "daily_summary=off",
+        ])
+        .unwrap();
+
+        let Some(Command::Set { pairs, resets }) = cli.command else {
+            panic!("expected set");
+        };
+        assert_eq!(pairs, ["concurrency=2", "daily_summary=off"]);
+        assert_eq!(resets, ["daily_summary"]);
     }
 
     #[test]
@@ -726,20 +740,5 @@ mod tests {
         let error = Cli::try_parse_from(["dalsegno", "--ip-policy", "ipv4", "doctor"]).unwrap_err();
 
         assert_eq!(error.kind(), ErrorKind::ValueValidation);
-    }
-
-    #[test]
-    fn fetch_text_counts_problems() {
-        let report = FetchReport {
-            fetched: 3,
-            already_stored: 1,
-            lost: vec![7],
-            failed: vec![8, 9],
-        };
-
-        assert_eq!(
-            fetch_text(&report),
-            "fetched: 3\nalready stored: 1\nlost: 1\nfailed: 2\n"
-        );
     }
 }

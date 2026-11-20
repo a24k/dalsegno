@@ -2,14 +2,10 @@
 
 use dalsegno_app::acquisition::AddReport;
 use dalsegno_app::analysis::Diff;
-use dalsegno_app::backfill::BackfillReport;
 use dalsegno_app::doctor::DoctorReport;
 use dalsegno_app::export::{CandidateReport, CutReport, PublishReport, RefineReport};
-use dalsegno_app::features::FeatureReport;
-use dalsegno_app::fetch::FetchReport;
 use dalsegno_app::offline::{PeriodReport, ScanReport};
 use dalsegno_app::probe::ProbeReport;
-use dalsegno_app::retention::SweepReport;
 
 pub(crate) fn candidates_text(report: &CandidateReport) -> String {
     let starts: String = report
@@ -198,39 +194,5 @@ pub(crate) fn add_text(report: &AddReport) -> String {
         "stream id: {}\n{}",
         report.stream_id,
         probe_text(&report.probe)
-    )
-}
-
-pub(crate) fn backfill_text(report: &BackfillReport) -> String {
-    format!(
-        "head sq: {}\nfetched: {}\nlost: {}\nstill open: {}\n",
-        report.head_sq, report.fetched, report.lost, report.failed
-    )
-}
-
-pub(crate) fn features_text(report: &FeatureReport) -> String {
-    format!(
-        "fragments: {}\nbins: {}\nruns: {}\nunreadable: {}\n",
-        report.fragments,
-        report.bins,
-        report.runs,
-        report.unreadable.len()
-    )
-}
-
-pub(crate) fn sweep_text(report: &SweepReport) -> String {
-    format!(
-        "expired: {}\norphans: {}\ntemporary: {}\nrepaired rows: {}\n",
-        report.expired, report.orphans, report.temporary, report.repaired
-    )
-}
-
-pub(crate) fn fetch_text(report: &FetchReport) -> String {
-    format!(
-        "fetched: {}\nalready stored: {}\nlost: {}\nfailed: {}\n",
-        report.fetched,
-        report.already_stored,
-        report.lost.len(),
-        report.failed.len()
     )
 }

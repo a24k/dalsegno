@@ -1,6 +1,6 @@
 //! Identity of a stream and the IP family used to reach it.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
@@ -69,7 +69,7 @@ fn id_from_url(url: &str) -> Option<&str> {
 }
 
 /// One of the two address families.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IpFamily {
     /// IPv4.
@@ -98,7 +98,7 @@ impl fmt::Display for IpFamily {
 }
 
 /// Which families may be used, and in what order (FR-A4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IpPolicy {
     /// Prefer IPv6, fall back to IPv4.

@@ -59,7 +59,17 @@ dalsegno jobs
 dalsegno changes
 dalsegno start <id>
 dalsegno stop  <id>
+dalsegno doctor   [--stream <id>]
+dalsegno set      [<key>=<value>]... [--reset <key>]...
+dalsegno fetch    <id> --itag <n> --first <sq> --last <sq>
+dalsegno backfill <id> [--hours <n>]
+dalsegno features <id>
+dalsegno sweep
 ```
+
+`fetch`, `backfill`, `features` and `sweep` queue a job and print it, and `dalsegno jobs` follows
+it. `doctor --stream` also probes the stream, which can take a few minutes. `set` shows the
+shared operational settings, and changes them when given `key=value` or `--reset key`.
 
 A running job that reports progress shows its share done and, from its pace so far, about how
 long is left. So far only backfill reports, after each 500 fragments, and the API returns it as
@@ -82,17 +92,11 @@ dalsegno diff     --env <file> --period <s> --against <file> --against-period <s
 
 Envelope input accepts `.npy` so that existing Python results can be used directly.
 
-Until milestone 5 these commands run in process (D-17). All but `doctor` and `probe` need
-`--data-dir` or `DALSEGNO_DATA`:
+Until milestone 5 these commands run in process (D-17) and need `--data-dir` or
+`DALSEGNO_DATA`:
 
 ```text
-dalsegno doctor   [--stream <id>]
-dalsegno probe    <id>
 dalsegno add      <id>
-dalsegno fetch    <id> --itag <n> --first <sq> --last <sq> [--output <file>]
-dalsegno backfill <id> [--hours <n>]
-dalsegno features <id>
-dalsegno sweep
 dalsegno program    <id> --short-name <name> --output-dir <dir>
 dalsegno candidates <id> --time <s>
 dalsegno refine     <id> --boundary <s> --period <s>
